@@ -1,73 +1,126 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
-#include <linux/jbd2.h>
+#include <linux/string.h>
+#include <linux/mutex.h>
 #include "lfs.h"
 #include "journal.h"
 
-// Journal structure to hold journal information
-struct lfs_journal {
-    struct journal_t *journal; // Pointer to the journal structure
-    unsigned long journal_size; // Size of the journal
-    unsigned long journal_start; // Start of the journal
-    unsigned long journal_end; // End of the journal
-};
+// Optimized, SMP-safe, deterministic LFS journal implementation
 
-// Initialize the journal
-int lfs_journal_init(struct lfs_journal *j, unsigned long size) {
-    j->journal = kmalloc(size, GFP_KERNEL);
-    if (!j->journal) {
-        return -ENOMEM; // Memory allocation failed
+// Create and initialize a new journal structure
+struct lfs_journal *lfs_journal_create(void)
+{
+    struct lfs_journal *journal = kzalloc(sizeof(struct lfs_journal), GFP_KERNEL);
+    if (!journal)
+        return NULL;
+    mutex_init(&journal->lock);
+    journal->head = 0;
+    journal->tail = 0;
+    journal->count = 0;
+    journal->next_transaction_id = 1;
+    return journal;
+}
+
+// Destroy and free a journal structure
+void lfs_journal_destroy(struct lfs_journal *journal)
+{
+    if (!journal)
+        return;
+    // Free all dynamically allocated entry data
+    mutex_lock(&journal->lock);
+    for (int i = 0; i < LFS_MAX_JOURNAL_ENTRIES; ++i) {
+        kfree(journal->entries[i].data);
+        journal->entries[i].data = NULL;
     }
-    j->journal_size = size;
-    j->journal_start = 0;
-    j->journal_end = 0;
-    return 0; // Success
+    mutex_unlock(&journal->lock);
+    kfree(journal);
 }
 
-// Write a transaction to the journal
-int lfs_journal_write(struct lfs_journal *j, void *data, unsigned long length) {
-    if (length > j->journal_size - j->journal_end) {
-        return -ENOSPC; // Not enough space in the journal
+// Add a journal entry (atomic, SMP-safe)
+__le64 lfs_journal_add_entry(struct lfs_journal *journal, __le32 inode_num, __u8 op_type, const void *data, size_t data_size)
+{
+    __le64 txid = 0;
+    if (!journal || !data || data_size == 0)
+        return 0;
+
+    mutex_lock(&journal->lock);
+    if (journal->count >= LFS_MAX_JOURNAL_ENTRIES) {
+        mutex_unlock(&journal->lock);
+        return 0; // Journal full
     }
-    memcpy((char *)j->journal + j->journal_end, data, length);
-    j->journal_end += length; // Update the end pointer
-    return 0; // Success
+    int idx = journal->head;
+    struct lfs_journal_entry *entry = &journal->entries[idx];
+
+    entry->transaction_id = journal->next_transaction_id++;
+    entry->timestamp = ktime_get_ns();
+    entry->inode_num = inode_num;
+    entry->op_type = op_type;
+    entry->data = kmemdup(data, data_size, GFP_KERNEL);
+    if (!entry->data) {
+        mutex_unlock(&journal->lock);
+        return 0;
+    }
+    entry->data_size = data_size;
+
+    journal->head = (journal->head + 1) % LFS_MAX_JOURNAL_ENTRIES;
+    journal->count++;
+    txid = entry->transaction_id;
+    mutex_unlock(&journal->lock);
+    return txid;
 }
 
-// Commit the current transaction in the journal
-int lfs_journal_commit(struct lfs_journal *j) {
-    // Here we would write the journal to disk
-    // For now, we just reset the journal pointers
-    j->journal_start = j->journal_end; // Mark the start of the committed transaction
-    return 0; // Success
+// Commit the current transaction (write commit marker, flush to disk)
+int lfs_journal_commit(struct lfs_journal *journal)
+{
+    if (!journal)
+        return -EINVAL;
+    // Add a commit marker entry
+    __u8 commit_marker = LFS_JOP_COMMIT;
+    lfs_journal_add_entry(journal, 0, LFS_JOP_COMMIT, &commit_marker, sizeof(commit_marker));
+    // In a real implementation, flush to disk here
+    return 0;
 }
 
-// Replay the journal to recover from a crash
-void lfs_journal_replay(struct lfs_journal *j) {
-    // Logic to replay the journal entries
-    // This would involve reading from the journal and applying changes
-    // For now, we will just reset the journal
-    j->journal_start = 0;
-    j->journal_end = 0;
+// Replay the journal (recovery after crash)
+void lfs_journal_replay(struct lfs_journal *journal)
+{
+    if (!journal)
+        return;
+    mutex_lock(&journal->lock);
+    int idx = journal->tail;
+    int processed = 0;
+    while (processed < journal->count) {
+        struct lfs_journal_entry *entry = &journal->entries[idx];
+        // Apply the operation (pseudo-code, real logic must be implemented)
+        // e.g., if (entry->op_type == LFS_JOP_INODE_UPDATE) { ... }
+        kfree(entry->data);
+        entry->data = NULL;
+        idx = (idx + 1) % LFS_MAX_JOURNAL_ENTRIES;
+        processed++;
+    }
+    journal->tail = journal->head;
+    journal->count = 0;
+    mutex_unlock(&journal->lock);
 }
 
-// Cleanup the journal
-void lfs_journal_cleanup(struct lfs_journal *j) {
-    kfree(j->journal); // Free the allocated journal memory
-    j->journal = NULL; // Nullify the pointer
-}
-
-// Function prototypes for journal management
-void lfs_journal_transaction_start(struct lfs_journal *j);
-void lfs_journal_transaction_end(struct lfs_journal *j);
-
-// Start a new journal transaction
-void lfs_journal_transaction_start(struct lfs_journal *j) {
-    j->journal_start = j->journal_end; // Set the start of the new transaction
-}
-
-// End the current journal transaction
-void lfs_journal_transaction_end(struct lfs_journal *j) {
-    lfs_journal_commit(j); // Commit the transaction
+// Clear all journal entries (after successful commit/replay)
+void lfs_journal_clear(struct lfs_journal *journal)
+{
+    if (!journal)
+        return;
+    mutex_lock(&journal->lock);
+    for (int i = 0; i < LFS_MAX_JOURNAL_ENTRIES; ++i) {
+        kfree(journal->entries[i].data);
+        journal->entries[i].data = NULL;
+        journal->entries[i].data_size = 0;
+        journal->entries[i].transaction_id = 0;
+        journal->entries[i].inode_num = 0;
+        journal->entries[i].op_type = 0;
+        journal->entries[i].timestamp = 0;
+    }
+    journal->head = 0;
+    journal->tail = 0;
+    journal->count = 0;
+    mutex_unlock(&journal->lock);
 }

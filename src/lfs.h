@@ -7,42 +7,37 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/time.h>
+#include "lfs_format.h" // Use canonical on-disk format for consistency
 
-// Define the magic number for LFS
-#define LFS_MAGIC 0x4C4653 // "LFS"
+// Use canonical magic number (matches on-disk format)
+#define LFS_MAGIC LFS_MAGIC
 
-// Superblock structure
-struct lfs_super_block {
-    __le32 s_magic;          // Magic number
-    __le32 s_block_size;     // Size of blocks
-    __le32 s_inode_count;     // Total number of inodes
-    __le32 s_block_count;     // Total number of blocks
-    __le32 s_free_blocks;     // Number of free blocks
-    __le32 s_free_inodes;     // Number of free inodes
-    __le32 s_dirty;           // Dirty flag for journal recovery
-    char s_uuid[16];          // UUID for the filesystem
-    // Additional fields can be added as needed
-};
+// Use the canonical superblock and inode structures from lfs_format.h
+// This ensures consistency and future-proofing
 
-// Inode structure
-struct lfs_inode {
-    __le32 i_mode;           // File mode
-    __le32 i_uid;            // Owner UID
-    __le32 i_gid;            // Group ID
-    __le32 i_size;           // Size of the file
-    __le32 i_blocks;         // Number of blocks allocated
-    __le32 i_atime;          // Last access time
-    __le32 i_mtime;          // Last modification time
-    __le32 i_ctime;          // Last status change time
-    // Additional fields can be added as needed
-};
+// Kernel VFS integration helpers
+#define LFS_SB(sb) ((struct lfs_superblock *)((sb)->s_fs_info))
 
-// Function prototypes
-int lfs_mount(struct super_block *sb);
+// Function prototypes (kernel-space, SMP-safe, robust)
+// Mount and unmount operations
+int lfs_mount(struct super_block *sb, void *data, int silent);
 void lfs_unmount(struct super_block *sb);
-struct lfs_super_block *lfs_get_super_block(struct super_block *sb);
-void lfs_put_super_block(struct lfs_super_block *s);
-struct lfs_inode *lfs_get_inode(struct super_block *sb, unsigned long ino);
-void lfs_put_inode(struct lfs_inode *inode);
+
+// Superblock helpers
+struct lfs_superblock *lfs_get_superblock(struct super_block *sb);
+void lfs_put_superblock(struct lfs_superblock *s);
+
+// Inode helpers
+struct lfs_inode *lfs_get_disk_inode(struct super_block *sb, unsigned long ino);
+void lfs_put_disk_inode(struct lfs_inode *inode);
+
+// Utility: Convert VFS inode to LFS inode_info (see inode.h)
+struct lfs_inode_info *LFS_I(const struct inode *inode);
+
+// Utility: Convert VFS superblock to LFS superblock
+static inline struct lfs_superblock *LFS_SB_INFO(const struct super_block *sb)
+{
+    return (struct lfs_superblock *)sb->s_fs_info;
+}
 
 #endif // LFS_H

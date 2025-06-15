@@ -1,35 +1,23 @@
-# Makefile for Lion's File System (LFS)
+# Makefile for Lion's File System (LFS) kernel module
 
-# This Makefile is responsible for compiling the LFS kernel module and linking the necessary object files.
-
-# Define the kernel build directory
+# Use kernel build system for proper module compilation
 KDIR ?= /lib/modules/$(shell uname -r)/build
+PWD  := $(shell pwd)
+MODULE := lfs
 
-# Compiler and flags
-CC = gcc
-CFLAGS = -Wall -Werror -O2 -I$(KDIR)/include
+# Kernel module source files
+obj-m += $(MODULE).o
+$(MODULE)-y := super.o inode.o balloc.o journal.o dir.o file.o
 
-# Source files
-SRC = super.c inode.c balloc.c journal.c dir.c file.c
-OBJ = $(SRC:.c=.o)
-
-# Module name
-MODULE = lfs
-
-# Default target
-all: $(MODULE).ko
-
-# Build the kernel module
-$(MODULE).ko: $(OBJ)
-	$(CC) -shared -o $@ $^ -Wl,--no-as-needed
-
-# Compile source files into object files
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+# Default target: build with kernel build system
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 # Clean up build artifacts
 clean:
-	rm -f $(OBJ) $(MODULE).ko
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
 
 # Phony targets
 .PHONY: all clean
+
+# For userland tools, build separately in ../tools if needed

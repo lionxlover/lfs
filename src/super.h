@@ -4,34 +4,29 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
+#include "lfs_format.h" // Use canonical on-disk format for consistency
 
-// Magic number for LFS
-#define LFS_MAGIC 0x4C465300 // "LFS\0"
+// Use canonical magic number and superblock structure from lfs_format.h
+#define LFS_MAGIC LFS_MAGIC
 
-// Superblock structure definition
-struct lfs_super_block {
-    __le32 s_magic;                // Magic number
-    __le32 s_block_size;           // Size of blocks in bytes
-    __le32 s_inode_count;          // Total number of inodes
-    __le32 s_block_count;          // Total number of blocks
-    __le32 s_free_blocks;          // Number of free blocks
-    __le32 s_free_inodes;          // Number of free inodes
-    __le32 s_first_data_block;     // First data block
-    __le32 s_log_block_size;       // Block size for logging
-    __le32 s_mount_count;           // Mount count
-    __le32 s_max_mount_count;       // Maximum mount count before fsck
-    __le32 s_state;                 // Filesystem state (clean/dirty)
-    uuid_t s_uuid;                  // UUID of the filesystem
-    char s_volume_name[16];         // Volume name
-    // Additional fields can be added as needed
-};
+// Use the canonical superblock structure for all kernel operations
+// This ensures consistency, future-proofing, and compatibility with userland tools
 
-// Function prototypes for superblock management
-struct lfs_super_block *lfs_get_super_block(struct super_block *sb);
-int lfs_read_super_block(struct super_block *sb);
-int lfs_write_super_block(struct super_block *sb);
-void lfs_update_super_block(struct super_block *sb);
-void lfs_mount(struct super_block *sb);
+// Kernel VFS integration helper
+#define LFS_SB(sb) ((struct lfs_superblock *)((sb)->s_fs_info))
+
+// Function prototypes for superblock management (kernel-space, SMP-safe)
+// Read superblock from disk into memory
+int lfs_read_superblock(struct super_block *sb, struct lfs_superblock *disk_sb);
+
+// Write superblock from memory to disk
+int lfs_write_superblock(struct super_block *sb, const struct lfs_superblock *disk_sb);
+
+// Update in-memory superblock and write to disk (atomic update)
+int lfs_update_superblock(struct super_block *sb);
+
+// Mount and unmount operations (should match lfs.h)
+int lfs_mount(struct super_block *sb, void *data, int silent);
 void lfs_unmount(struct super_block *sb);
 
 #endif // LFS_SUPER_H

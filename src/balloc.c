@@ -79,15 +79,21 @@ int lfs_init_block_bitmap(struct super_block *sb)
         return -ENOMEM;
 
     // Mark reserved blocks (superblock, bitmaps, journal, etc.) as allocated
-    // Example: reserve first N blocks (superblock + bitmap + journal)
     unsigned long reserved = 1; // superblock
     reserved += DIV_ROUND_UP(bitmap_size, s->block_size); // bitmap blocks
     reserved += s->journal_size; // journal blocks
 
-    for (unsigned long i = 0; i < reserved && i < s->total_blocks; i++)
+    // Ensure reserved does not exceed total_blocks
+    if (reserved > s->total_blocks)
+        reserved = s->total_blocks;
+
+    for (unsigned long i = 0; i < reserved; i++)
         lfs_set_block_used((unsigned char *)s->block_bitmap, i);
 
-    s->free_blocks -= reserved;
+    if (s->free_blocks > reserved)
+        s->free_blocks -= reserved;
+    else
+        s->free_blocks = 0;
 
     return 0;
 }
@@ -96,6 +102,8 @@ int lfs_init_block_bitmap(struct super_block *sb)
 void lfs_cleanup_block_bitmap(struct super_block *sb)
 {
     struct lfs_superblock *s = sb->s_fs_info;
-    kfree(s->block_bitmap);
-    s->block_bitmap = NULL;
+    if (s->block_bitmap) {
+        kfree(s->block_bitmap);
+        s->block_bitmap = NULL;
+    }
 }
