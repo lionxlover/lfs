@@ -1,158 +1,143 @@
-# Lion's File System (LFS) - On-Disk Format Specification v1.0
+# Lion File System (LFS) - On-Disk Format Specification v1.0
 
 ## 1. Overview
 
-This document specifies the definitive on-disk layout for the Lion File System (LFS). All multi-byte fields are stored in **little-endian** format, using standard Linux kernel types like `__le32` and `__le64` for clarity. The design prioritizes performance, reliability, and simplicity.
+This document specifies the on-disk layout for the Lion File System (LFS). All multi-byte integer fields are stored in **little-endian** format. The design prioritizes extreme performance, scalability, and data integrity.
 
-The default block size is **4096 bytes**.
+The default block size is **4096 bytes**, but it is configurable at format time.
 
-## 2. Filesystem Layout
+## 2. Global Filesystem Layout
 
-The filesystem is organized into a series of contiguous sections. The superblock, located at a fixed position, contains pointers to the dynamic sections (bitmaps, inode table).
+LFS divides the storage device into several key metadata regions and a large data region. The superblock, at a fixed location, acts as the primary anchor, containing pointers to the roots of all other data structures.
 
 ```
-+--------------------------------------------------------------------------+
-| Block 0     | Block 1       | Journal Area        | Inode     | Block     |
-| Boot Sector | Superblock    | (Size defined in    | Bitmap    | Bitmap    | ...
-| (Unused)    | (Primary)     | the Superblock)     |           |           |
-+--------------------------------------------------------------------------+
++-------------------------------------------------------------------------------------------------+
+| Block 0     | Block 1       | Backup SBs    | Feature/Config | Journal (Meta) | Journal (Data)   |
+| Boot Sector | Superblock    | (Redundant)   | Block          | (Fast, Small)  | (Optional, Large)|
++-------------------------------------------------------------------------------------------------+
                                      |
                                      V
-... +----------------------------------------------------------------------+
-    | Inode Table                                     | Data Blocks        |
-    | (Array of Inode structures)                     | (Remaining Space)  |
-    +----------------------------------------------------------------------+
+... +---------------------------------------------------------------------------------------------+
+    | Inode Bitmap | Block Bitmap | Free Extent Tree | Inode Table | Checksum Tree | Snapshot Meta  |
++-------------------------------------------------------------------------------------------------+
+                                     |
+                                     V
+... +---------------------------------------------------------------------------------------------+
+    | B+Tree Nodes (Directories, Extents)             | Data Blocks (File Contents)               |
+    | (Dynamically allocated)                         | (The rest of the volume)                  |
+    +---------------------------------------------------------------------------------------------+
 ```
 
-| Section | Location (Block Number) | Description |
+## 3. The Superblock (`lfs_superblock_t`)
+
+Located at a fixed offset (e.g., 4KB, Block 1). Contains pointers to the roots of all major filesystem structures. Backup copies are stored at fixed intervals for redundancy.
+
+| Offset | Size | Field | Description |
+| :--- | :--- | :--- | :--- |
+| 0 | 4 | `s_magic` | Magic number: **`0x1F510F5D`** ("LIONFSD"). |
+| 4 | 4 | `s_version` | `__le32` Filesystem format version. |
+| 8 | 4 | `s_block_size` | `__le32` Block size in bytes. |
+| 12 | 8 | `s_feature_flags` | `__le64` Bitmask of enabled features (checksums, snapshots, etc.). |
+| 20 | 8 | `s_blocks_count` | `__le64` Total number of blocks. |
+| 28 | 8 | `s_inodes_count` | `__le64` Total number of inodes. |
+| 36 | 16 | `s_uuid` | `__u8[16]` Unique 128-bit identifier for the volume. |
+| 52 | 4 | `s_state` | `__le32` Filesystem state: `1` (Clean), `2` (Dirty), `3` (Replaying). |
+| 56 | 8 | `s_root_dir_block` | `__le64` Block address of the root of the Directory B+Tree. |
+| 64 | 8 | `s_inode_bitmap_block` | `__le64` Start block of the inode allocation bitmap. |
+| 72 | 8 | `s_block_bitmap_block` | `__le64` Start block of the block allocation bitmap. |
+| 80 | 8 | `s_free_extent_tree_root` | `__le64` Block address of the root of the Free Extent B+Tree. |
+| 88 | 8 | `s_inode_table_block` | `__le64` Start block of the main inode table. |
+| 96 | 8 | `s_journal_meta_start` | `__le64` Start block of the high-speed metadata journal. |
+| 104 | 4 | `s_journal_meta_blocks` | `__le32` Size of the metadata journal. |
+| 108 | 8 | `s_journal_data_start` | `__le64` Start block of the optional data journal. |
+| 116 | 4 | `s_journal_data_blocks` | `__le32` Size of the data journal. |
+| 120 | 8 | `s_snapshot_meta_block` | `__le64` Start block of the snapshot metadata area. |
+| 128 | 8 | `s_checksum_tree_root` | `__le64` Block address of the root of the global checksum tree. |
+| ... | ... | `s_padding` | Reserved for future pointers. Padded to block size. |
+
+## 4. Inode and Extent-Based Allocation
+
+LFS uses an **extent-based** model for file allocation, which is highly efficient for both large and small files. An extent is a contiguous range of blocks.
+
+### Inode Structure (`lfs_inode_t`)
+Contains all metadata for a file object. If a file has more extents than can fit in the inode, `i_extent_root` points to the root of a dedicated B+Tree for that file's extents.
+
+| Field | Type | Description |
 | :--- | :--- | :--- |
-| **Boot Sector** | Block 0 | Reserved for bootloaders. Unused by LFS. |
-| **Superblock** | Block 1 | Contains critical filesystem metadata and pointers. |
-| **Journal Area** | Starts at `s_journal_start_block` | A circular write-ahead log for metadata operations. |
-| **Inode Bitmap** | Located at `s_inode_bitmap_block` | Tracks allocated/free inodes (1 bit per inode). |
-| **Block Bitmap** | Located at `s_block_bitmap_block` | Tracks allocated/free data blocks (1 bit per block). |
-| **Inode Table** | Starts at `s_inode_table_block` | A contiguous array of all inode structures. |
-| **Data Blocks** | The remaining space on the volume | Stores file content and directory data. |
+| `i_mode` | `__le16` | File type and POSIX permissions. |
+| `i_links_count` | `__le16` | Hard link count. |
+| `i_uid`, `i_gid` | `__le32` | User and Group ID. |
+| `i_size` | `__le64` | File size in bytes. |
+| `i_atime`, `mtime`, `ctime`, `btime` | `__le64` | All four standard timestamps. |
+| `i_flags` | `__le64` | Flags: `COMPRESSED`, `IMMUTABLE`, `ENCRYPTED`, `NO_SCRUB`, etc. |
+| `i_blocks_count` | `__le64` | Number of blocks allocated. |
+| `i_checksum` | `__le32` | CRC32 checksum of this inode structure itself. |
+| `i_extent_count` | `__le32` | Number of extents stored directly in the inode. |
+| `i_direct_extents` | `lfs_extent_t[4]` | Space for 4 direct extents for small files. |
+| `i_extent_root` | `__le64` | Block address of the root of this inode's extent B+Tree. |
 
----
-
-## 3. The Superblock (`struct lfs_super_block`)
-
-The superblock is the root of the filesystem, located at the fixed **Block 1**. It is padded to 1024 bytes.
-
-| Offset (bytes) | Size (bytes) | Field Name | Description |
-| :--- | :--- | :--- | :--- |
-| 0 | 4 | `s_magic` | Magic number: **`0x1F51F510`** ("LFS LION"). |
-| 4 | 4 | `s_version` | Filesystem version (starts at 1). |
-| 8 | 4 | `s_block_size` | Block size in bytes (e.g., 4096). |
-| 12 | 8 | `s_blocks_count` | `__le64` Total number of blocks in the filesystem. |
-| 20 | 8 | `s_inodes_count` | `__le64` Total number of inodes in the filesystem. |
-| 28 | 8 | `s_free_blocks_count` | `__le64` Count of free blocks. |
-| 36 | 8 | `s_free_inodes_count` | `__le64` Count of free inodes. |
-| 44 | 4 | `s_state` | `__le32` Filesystem state: `1` (Clean), `2` (Dirty). |
-| 48 | 16 | `s_uuid` | `__u8[16]` A 128-bit unique identifier for the volume. |
-| 64 | 8 | `s_journal_start_block`| `__le64` Starting block of the journal area. |
-| 72 | 4 | `s_journal_blocks` | `__le32` Number of blocks dedicated to the journal. |
-| 76 | 8 | `s_inode_bitmap_block`| `__le64` Block number of the inode bitmap. |
-| 84 | 8 | `s_block_bitmap_block`| `__le64` Block number of the block bitmap. |
-| 92 | 8 | `s_inode_table_block` | `__le64` Starting block number of the inode table. |
-| 100 | 4 | `s_inode_size` | `__le32` Size of a single inode structure (e.g., 256). |
-| 104 | 920 | `s_padding` | Reserved for future use. Padded to 1024 bytes. |
-
----
-
-## 4. Inodes and the Inode Table
-
-The Inode Table is a simple, contiguous array of `lfs_inode` structures. An inode number is its 1-based index into this table.
-- **Inode 1:** Reserved (traditionally for bad blocks).
-- **Inode 2:** The root directory (`/`).
-
-### Inode Structure (`struct lfs_inode`)
-Each inode is 256 bytes. It contains all metadata for a file except its name.
-
-| Offset | Size | Field Name | Description |
-| :--- | :--- | :--- | :--- |
-| 0 | 2 | `i_mode` | `__le16` File type and POSIX permissions (rwx). |
-| 2 | 2 | `i_links_count` | `__le16` Number of hard links to this inode. |
-| 4 | 4 | `i_uid` | `__le32` User ID of the owner. |
-| 8 | 4 | `i_gid` | `__le32` Group ID of the owner. |
-| 12 | 8 | `i_size` | `__le64` File size in bytes. |
-| 20 | 8 | `i_atime` | `__le64` Last access time (seconds since epoch). |
-| 28 | 8 | `i_ctime` | `__le64` Inode change time. |
-| 36 | 8 | `i_mtime` | `__le64` File modification time. |
-| 44 | 8 | `i_dtime` | `__le64` Deletion time (0 if not deleted). |
-| 52 | 4 | `i_flags` | `__le32` File flags (e.g., immutable, append-only). |
-| 56 | 8 | `i_blocks_count`| `__le64` Number of blocks allocated to this file. |
-| 64 | 60 | `i_block[15]` | `__le32[15]` Block pointers (12 direct, 1 indirect, 1 double-indirect, 1 triple-indirect). |
-| 124 | 132 | `i_padding` | Reserved. Padded to 256 bytes. |
-
-### Inode Block Pointer Logic
-
-The `i_block` array provides a tiered system to locate file data, enabling both small file efficiency and large file support.
-
-```
-lfs_inode.i_block[]
-  +----------------------------------------------------------------------+
-  | [0] ... [11]       | [12]               | [13]                       |
-  | (Direct Pointers)  | (Indirect Pointer) | (Double Indirect Pointer)  |
-  +--------------------+--------------------+----------------------------+
-            |                    |                    |
-            |                    |                    V
-            |                    |           [Block of Indirect Pointers]
-            |                    |                    |
-            |                    |                    V
-            |                    |           [Block of Data Pointers]
-            |                    |                    |
-            |                    |                    V
-            |                    |               [Data Block]
-            |                    |
-            |                    V
-            |           [Block of Data Pointers]
-            |                    |
-            |                    V
-            |               [Data Block]
-            |
-            V
-       [Data Block]
-```
----
-
-## 5. Directory Entries (`struct lfs_dir_entry`)
-
-Directories are special files whose data blocks contain a linked list of `lfs_dir_entry` structures. This structure links a filename to an inode number.
-
-| Offset | Size | Field Name | Description |
-| :--- | :--- | :--- | :--- |
-| 0 | 8 | `inode` | `__le64` Inode number for this entry (0 if unused). |
-| 8 | 2 | `rec_len` | `__le16` Total length of this entry. Points to the start of the next entry. |
-| 10 | 1 | `name_len` | `__u8` Length of the file name in bytes. |
-| 11 | 1 | `file_type` | `__u8` File type (matches inode mode, for convenience). |
-| 12 | 255 | `name` | `char[255]` File name (null-terminated). |
-
-The `rec_len` field makes it easy to traverse the directory and skip over deleted entries, whose `inode` number is set to 0.
-
----
-
-## 6. The Journal
-
-The journal is a **circular write-ahead log** used to guarantee metadata consistency. Changes are written to the journal first; only after a transaction is committed is the metadata written to its final location.
-
-### Journal Logic
-
-The journal operates like a circular buffer with a `head` and `tail` pointer. New transactions are written at the `tail`. The `head` points to the oldest transaction that still needs to be committed to disk.
-
-```
-       <-- Log wraps around <--
-+--------------------------------------------------------------------------+
-|  | Committed Tx | Committed Tx | Oldest Live Tx (Head) | ... | New Tx (Tail) | Free Space |
-+--------------------------------------------------------------------------+
-   ^                                                                       |
-   |_________________________________ Moves forward _______________________|
+### Extent Structure (`lfs_extent_t`)
+A simple structure representing a contiguous run of blocks.
+```c
+typedef struct lfs_extent {
+    __le64  ex_logical_start;   // First logical block in the file.
+    __le64  ex_physical_start;  // First physical block on disk.
+    __le32  ex_length;          // Number of blocks in this extent.
+    __le32  ex_flags;           // Flags (e.g., preallocated, unwritten).
+} lfs_extent_t;
 ```
 
-### Journal Transaction Structure
+## 5. Directory B+Tree
 
-A single transaction in the journal consists of:
-1.  A **Descriptor Block**: Marks the start of a transaction and lists the final on-disk locations of all metadata blocks that will be changed.
-2.  **Metadata Block Copies**: One or more blocks containing the new versions of the metadata (e.g., a modified inode table block, a changed bitmap block).
-3.  A **Commit Block**: A single, final block that marks the transaction as complete. If a crash occurs before the commit block is written, the entire transaction is considered invalid and is discarded during recovery.
+To handle directories with millions of entries efficiently, LFS uses a B+Tree instead of a linear list.
+
+*   **Internal Nodes**: Contain keys (hashes of filenames) and pointers to child nodes.
+*   **Leaf Nodes**: Contain the actual directory entries, sorted by filename hash.
+
+### Directory Entry (`lfs_dir_entry_t`)
+Located in the leaf nodes of the B+Tree.
+```c
+typedef struct lfs_dir_entry {
+    __le64  d_inode_num;      // Inode number of the entry.
+    __u8    d_name_len;       // Length of the filename.
+    __u8    d_file_type;      // File type (for convenience).
+    char    d_name[];         // Variable-length filename.
+} lfs_dir_entry_t;
+```
+
+## 6. Journaling and Recovery
+
+LFS features a **multi-tier write-ahead journal** to provide tunable data consistency guarantees.
+
+*   **Metadata Journal**: A small, extremely fast circular log for all metadata changes (inodes, bitmaps, extents). This is always active.
+*   **Data Journal**: An optional, larger circular log that can be enabled (`data=journal`) for full data and metadata journaling, guaranteeing data content at the cost of performance.
+
+### Journal Transaction Header (`lfs_txn_header_t`)
+Every transaction in either journal begins with this header.
+```c
+typedef struct lfs_txn_header {
+    __le32  th_magic;         // Transaction magic number.
+    __le32  th_type;          // Type: START, COMMIT, REVOKE.
+    __le64  th_tid;           // Unique Transaction ID.
+    __le32  th_num_blocks;    // Number of data blocks following this header.
+    __le32  th_checksum;      // CRC32 of the entire transaction.
+} lfs_txn_header_t;
+```
+A transaction is only considered valid if a `COMMIT` block with a matching `th_tid` is present.
+
+## 7. Data Integrity: Checksums & Scrubbing
+
+LFS integrates data integrity at a fundamental level. A global, COW B+Tree (`s_checksum_tree_root`) stores checksums for all data blocks in the filesystem.
+
+*   **On Write**: When a data block is written, its checksum (e.g., CRC32c or SHA256) is calculated and stored in the checksum tree.
+*   **On Read**: The block is read, its checksum is re-calculated and verified against the stored value. A mismatch triggers an I/O error and can trigger a recovery action if redundancy (RAID) is available.
+*   **Scrubbing**: A background process (`lfs-scrubd`) periodically reads blocks and verifies their checksums to detect silent corruption.
+
+## 8. Snapshots
+
+LFS supports instantaneous, copy-on-write (COW) snapshots.
+
+*   When a snapshot is created, the current root of the filesystem metadata (superblock, inode table, etc.) is preserved.
+*   When a metadata or data block is modified, instead of overwriting it, a new copy is written to a free block (COW). The parent structures are updated to point to the new copy.
+*   The original block is kept, referenced only by the snapshot.
+*   Snapshot metadata is stored in a dedicated log starting at `s_snapshot_meta_block`, containing information like snapshot name, timestamp, and a pointer to its root metadata block.
