@@ -1,0 +1,49 @@
+{
+  "//": "LFS Filesystem Creation Configuration - Sample",
+  "//": "Use this file with 'mkfs.lfs --config=sample_config.json /dev/sdX'",
+
+  "volume": {
+    "label": "LFS_DATA_VOL",
+    "uuid": "auto", "//": "Set to 'auto' to generate a random UUID, or provide a specific one."
+  },
+
+  "geometry": {
+    "block_size": 4096, "//": "Filesystem block size in bytes. 4096 is recommended. (Valid: 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)",
+    "inode_size": 256,   "//": "Size of each inode structure in bytes. 256 is standard.",
+    "inodes": "auto"    "//": "Number of inodes to create. 'auto' calculates based on volume size (e.g., 1 inode per 16KB). Can be a specific number like 1000000."
+  },
+
+  "features": {
+    "//": "Enable or disable core filesystem features at format time.",
+    "journaling": {
+      "mode": "metadata", "//": "Journaling level. 'metadata' (default, fast), 'data' (slower, max safety), or 'none' (unsafe).",
+      "meta_journal_size_mb": 256, "//": "Size of the high-speed metadata journal in megabytes.",
+      "data_journal_size_mb": 1024 "//": "Size of the data journal, only used if mode is 'data'."
+    },
+    "integrity": {
+      "checksum_algorithm": "crc32c", "//": "Checksum algorithm for data and metadata. 'crc32c' (fastest), 'sha256' (more secure), or 'none'.",
+      "scrubbing": true             "//": "Pre-formats the scrubbing logs. Set to false to disable the feature entirely."
+    },
+    "snapshots": true,                "//": "Enable snapshot support by allocating necessary metadata structures.",
+    "compression": {
+      "enabled": true,                "//": "Enable transparent compression support.",
+      "default_algorithm": "lz4"      "//": "Default compression algorithm for new files. 'lz4' (fast) or 'zstd' (stronger)."
+    },
+    "raid": {
+      "enabled": false,               "//": "Set to true if this LFS volume will span multiple devices managed by the LFS RAID engine.",
+      "level": null                   "//": "RAID level if enabled. 'raid0', 'raid1', 'raid5'."
+    },
+    "quotas": true                    "//": "Enable user and group quota support."
+  },
+
+  "allocation_policy": {
+    "//": "Fine-tune the behavior of the block allocator.",
+    "strategy": "hybrid",           "//": "'hybrid' (default, uses extents first), 'extent_only', 'bitmap_only'.",
+    "data_clustering": true         "//": "Attempt to keep an inode's data blocks physically close to the inode itself."
+  },
+
+  "reserved": {
+    "//": "Reserve a percentage of blocks for root user and system daemons.",
+    "root_percentage": 5            "//": "Percentage of total blocks reserved for UID 0. Standard is 5%."
+  }
+}
