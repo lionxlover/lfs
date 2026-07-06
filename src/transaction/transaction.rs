@@ -22,14 +22,21 @@ impl Transaction {
     }
 }
 
+use crate::cache::node_cache::NodeCache;
+
 pub struct TxContext<'a> {
     pub disk: &'a mut Disk,
     pub tx: &'a mut Transaction,
+    pub node_cache: Option<&'a NodeCache>,
 }
 
 impl<'a> TxContext<'a> {
     pub fn new(disk: &'a mut Disk, tx: &'a mut Transaction) -> Self {
-        Self { disk, tx }
+        Self { disk, tx, node_cache: None }
+    }
+
+    pub fn with_cache(disk: &'a mut Disk, tx: &'a mut Transaction, node_cache: &'a NodeCache) -> Self {
+        Self { disk, tx, node_cache: Some(node_cache) }
     }
 
     pub fn read_block(&mut self, block: u64, buf: &mut [u8]) -> Result<()> {

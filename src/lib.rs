@@ -10,6 +10,8 @@ pub mod path;
 pub mod mount;
 pub mod transaction;
 pub mod recovery;
+pub mod btree;
+pub mod object;
 pub mod fs;
 pub mod cache;
 pub mod worker;

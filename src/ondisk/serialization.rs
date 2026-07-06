@@ -28,7 +28,12 @@ pub struct Superblock {
     pub secondary_sb_2: u64,
     pub block_group_count: u32,
     pub blocks_per_group: u32,
-    pub padding2: [u8; BLOCK_SIZE - 136], // 136 bytes used
+    pub inode_tree_root: u64,
+    pub dir_tree_root: u64,
+    pub extent_tree_root: u64,
+    pub freespace_tree_root: u64,
+    pub next_ino: u64,
+    pub padding2: [u8; BLOCK_SIZE - 176], // 176 bytes used
 }
 
 #[repr(C)]

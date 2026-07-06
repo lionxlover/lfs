@@ -1,7 +1,7 @@
 use std::env;
 use lionfs_core::disk::block_io::Disk;
 use lionfs_core::ondisk::serialization::{Superblock, Inode, BLOCK_SIZE, LIONFS_MAGIC};
-use lionfs_core::inode::manager::INODES_PER_BLOCK;
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -22,7 +22,8 @@ fn main() {
     // Calculate layout
     let bitmap_blocks = (total_blocks + (BLOCK_SIZE as u64 * 8) - 1) / (BLOCK_SIZE as u64 * 8);
     let inode_count = 1024; // Fixed for now
-    let inode_blocks = (inode_count + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
+    let inodes_per_block = BLOCK_SIZE as u64 / 256;
+    let inode_blocks = (inode_count + inodes_per_block - 1) / inodes_per_block;
     
     let bitmap_start = 1;
     let inode_table_start = bitmap_start + bitmap_blocks;
@@ -60,11 +61,16 @@ fn main() {
         padding_csum: 0,
         journal_start,
         journal_blocks,
-        secondary_sb_1,
-        secondary_sb_2,
-        block_group_count: 1, // Single group for now to simplify upgrade
+        secondary_sb_1: 8192,
+        secondary_sb_2: 16384,
+        block_group_count: 1,
         blocks_per_group: total_blocks as u32,
-        padding2: [0; BLOCK_SIZE - 136],
+        inode_tree_root: 0,
+        dir_tree_root: 0,
+        extent_tree_root: 0,
+        freespace_tree_root: 0,
+        next_ino: 2,
+        padding2: [0; 3920],
     };
 
     // Calculate checksum
