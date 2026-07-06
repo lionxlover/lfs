@@ -1,0 +1,48 @@
+use std::collections::HashMap;
+use std::io::Result;
+use crate::disk::block_io::Disk;
+
+pub struct Transaction {
+    pub id: u64,
+    pub dirty_blocks: HashMap<u64, Vec<u8>>,
+    pub timestamp: u64,
+}
+
+impl Transaction {
+    pub fn new(id: u64, timestamp: u64) -> Self {
+        Self {
+            id,
+            dirty_blocks: HashMap::new(),
+            timestamp,
+        }
+    }
+
+    pub fn add_block(&mut self, block_num: u64, data: Vec<u8>) {
+        self.dirty_blocks.insert(block_num, data);
+    }
+}
+
+pub struct TxContext<'a> {
+    pub disk: &'a mut Disk,
+    pub tx: &'a mut Transaction,
+}
+
+impl<'a> TxContext<'a> {
+    pub fn new(disk: &'a mut Disk, tx: &'a mut Transaction) -> Self {
+        Self { disk, tx }
+    }
+
+    pub fn read_block(&mut self, block: u64, buf: &mut [u8]) -> Result<()> {
+        if let Some(data) = self.tx.dirty_blocks.get(&block) {
+            buf.copy_from_slice(data);
+            Ok(())
+        } else {
+            self.disk.read_block(block, buf)
+        }
+    }
+
+    pub fn write_block(&mut self, block: u64, buf: &[u8]) -> Result<()> {
+        self.tx.add_block(block, buf.to_vec());
+        Ok(())
+    }
+}
