@@ -2,7 +2,7 @@ use std::io::{Result, Error, ErrorKind};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use crate::transaction::transaction::TxContext;
-use crate::ondisk::serialization::{Inode, DirEntryHeader};
+use crate::ondisk::serialization::{Inode, BlockGroupDescriptor, DirEntryHeader};
 use crate::file::writer::FileManager;
 
 pub struct DirEntry {
@@ -51,7 +51,7 @@ impl DirManager {
         Ok(entries)
     }
 
-    pub fn add_entry(ctx: &mut TxContext, bitmap_start: u64, total_blocks: u64, inode: &mut Inode, name: &OsStr, target_ino: u64, file_type: u8) -> Result<()> {
+    pub fn add_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, name: &OsStr, target_ino: u64, file_type: u8) -> Result<()> {
         let name_bytes = name.as_bytes();
         if name_bytes.len() > 255 {
             return Err(Error::new(ErrorKind::InvalidInput, "Name too long"));
@@ -86,7 +86,7 @@ impl DirManager {
                     entry_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     entry_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
                     
-                    FileManager::write_file(ctx, bitmap_start, total_blocks, inode, offset as u64, &entry_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &entry_bytes)?;
                     return Ok(());
                 }
             } else {
@@ -102,7 +102,7 @@ impl DirManager {
                     current_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     let name_end = 16 + header.name_len as usize;
                     current_bytes[16..name_end].copy_from_slice(&data[offset + 16..offset + name_end]);
-                    FileManager::write_file(ctx, bitmap_start, total_blocks, inode, offset as u64, &current_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &current_bytes)?;
                     
                     // New entry
                     let mut new_header = DirEntryHeader {
@@ -117,7 +117,7 @@ impl DirManager {
                     new_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&new_header));
                     new_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
                     
-                    FileManager::write_file(ctx, bitmap_start, total_blocks, inode, (offset + current_required as usize) as u64, &new_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, (offset + current_required as usize) as u64, &new_bytes)?;
                     return Ok(());
                 }
             }
@@ -138,11 +138,11 @@ impl DirManager {
         new_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&new_header));
         new_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
         
-        FileManager::write_file(ctx, bitmap_start, total_blocks, inode, inode.size, &new_bytes)?;
+        FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, inode.size, &new_bytes)?;
         Ok(())
     }
 
-    pub fn remove_entry(ctx: &mut TxContext, bitmap_start: u64, total_blocks: u64, inode: &mut Inode, name: &OsStr) -> Result<Option<u64>> {
+    pub fn remove_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, name: &OsStr) -> Result<Option<u64>> {
         let name_bytes = name.as_bytes();
         let data = FileManager::read_file(ctx, inode, 0, inode.size)?;
         let mut offset = 0;
@@ -166,7 +166,7 @@ impl DirManager {
                     let mut entry_bytes = vec![0u8; header.rec_len as usize];
                     entry_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     
-                    FileManager::write_file(ctx, bitmap_start, total_blocks, inode, offset as u64, &entry_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &entry_bytes)?;
                     return Ok(Some(target_ino));
                 }
             }

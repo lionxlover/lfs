@@ -26,7 +26,22 @@ pub struct Superblock {
     pub journal_blocks: u64,
     pub secondary_sb_1: u64,
     pub secondary_sb_2: u64,
-    pub padding2: [u8; BLOCK_SIZE - 128], // Ensures Superblock is exactly 4096 bytes
+    pub block_group_count: u32,
+    pub blocks_per_group: u32,
+    pub padding2: [u8; BLOCK_SIZE - 136], // 136 bytes used
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct BlockGroupDescriptor {
+    pub bg_block_bitmap: u64, // Block number for the block bitmap
+    pub bg_inode_bitmap: u64, // Block number for the inode bitmap (if separate)
+    pub bg_inode_table: u64,  // Block number of inode table start for this group
+    pub bg_free_blocks_count: u32,
+    pub bg_free_inodes_count: u32,
+    pub bg_used_dirs_count: u32,
+    pub bg_padding: u32,
+    pub bg_reserved: [u8; 32], // Total descriptor size = 64 bytes
 }
 
 pub const JOURNAL_MAGIC: u64 = 0x4A4F55524E414C31; // "JOURNAL1"

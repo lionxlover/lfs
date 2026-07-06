@@ -62,7 +62,9 @@ fn main() {
         journal_blocks,
         secondary_sb_1,
         secondary_sb_2,
-        padding2: [0; BLOCK_SIZE - 128],
+        block_group_count: 1, // Single group for now to simplify upgrade
+        blocks_per_group: total_blocks as u32,
+        padding2: [0; BLOCK_SIZE - 136],
     };
 
     // Calculate checksum

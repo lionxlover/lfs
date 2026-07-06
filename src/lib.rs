@@ -11,6 +11,8 @@ pub mod mount;
 pub mod transaction;
 pub mod recovery;
 pub mod fs;
+pub mod cache;
+pub mod worker;
 pub mod api;
 pub mod debug;
 pub mod utils;

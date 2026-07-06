@@ -1,7 +1,7 @@
 use std::io::{Result, Error, ErrorKind};
 use std::cmp::min;
 use crate::transaction::transaction::TxContext;
-use crate::ondisk::serialization::{Inode, Extent, BLOCK_SIZE, MAX_INLINE_EXTENTS};
+use crate::ondisk::serialization::{Inode, Extent, BLOCK_SIZE, MAX_INLINE_EXTENTS, BlockGroupDescriptor};
 use crate::allocator::bitmap::Allocator;
 
 pub struct FileManager;
@@ -43,7 +43,7 @@ impl FileManager {
         Ok(data)
     }
 
-    pub fn write_file(ctx: &mut TxContext, bitmap_start: u64, total_blocks: u64, inode: &mut Inode, offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write_file(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, offset: u64, data: &[u8]) -> Result<()> {
         let mut data_pos = 0;
         let mut current_offset = offset;
         
@@ -55,7 +55,7 @@ impl FileManager {
             
             if physical_block == 0 {
                 // We need to allocate a new block
-                physical_block = Allocator::allocate_extents(ctx, bitmap_start, total_blocks, 1)?;
+                physical_block = Allocator::allocate_extents(ctx, bg_desc, blocks_per_group, 1)?;
                 Self::add_extent(inode, logical_block, physical_block, 1)?;
             }
             
@@ -87,7 +87,7 @@ impl FileManager {
         Ok(())
     }
 
-    pub fn truncate_file(ctx: &mut TxContext, bitmap_start: u64, inode: &mut Inode, new_size: u64) -> Result<()> {
+    pub fn truncate_file(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, inode: &mut Inode, new_size: u64) -> Result<()> {
         if new_size >= inode.size {
             // Expansion is handled via write or explicit fallocate, ignore for now
             inode.size = new_size;
@@ -103,7 +103,7 @@ impl FileManager {
             
             if extent.logical_start >= new_blocks {
                 // Free the whole extent
-                Allocator::free_extents(ctx, bitmap_start, extent.physical_start, extent.length)?;
+                Allocator::free_extents(ctx, bg_desc, extent.physical_start, extent.length)?;
                 extent.logical_start = 0;
                 extent.physical_start = 0;
                 extent.length = 0;
@@ -112,7 +112,7 @@ impl FileManager {
                 let keep_blocks = new_blocks - extent.logical_start;
                 let free_blocks = extent.length - keep_blocks;
                 
-                Allocator::free_extents(ctx, bitmap_start, extent.physical_start + keep_blocks, free_blocks)?;
+                Allocator::free_extents(ctx, bg_desc, extent.physical_start + keep_blocks, free_blocks)?;
                 extent.length = keep_blocks;
                 new_extent_count += 1;
             } else {
