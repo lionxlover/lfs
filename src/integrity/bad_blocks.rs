@@ -37,11 +37,11 @@ impl BadBlockManager {
         }
     }
 
-    pub fn get_health_report(ctx: &mut TxContext, root_block: u64) -> String {
+    pub fn get_health_report(_ctx: &mut TxContext, root_block: u64) -> String {
         let mut report = String::from("LionFS Integrity Health Report\n");
         report.push_str("------------------------------\n");
         
-        let tree = BTree::<u64, u8>::new(root_block, 3);
+        let _tree = BTree::<u64, u8>::new(root_block, 3);
         // Simple placeholder for health report for Phase 5.
         // A full implementation would iterate over the BadBlocksTree.
         report.push_str("Bad Blocks Tree initialized.\n");

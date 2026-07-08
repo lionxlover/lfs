@@ -8,6 +8,12 @@ pub struct RebalancerWorker {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+impl Default for RebalancerWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RebalancerWorker {
     pub fn new() -> Self {
         Self {

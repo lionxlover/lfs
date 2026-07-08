@@ -1,5 +1,11 @@
 pub struct StorageOptimizer;
 
+impl Default for StorageOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StorageOptimizer {
     pub fn new() -> Self {
         Self {}

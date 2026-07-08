@@ -5,6 +5,12 @@ pub struct MultiDeviceManager {
     devices: HashMap<u64, DeviceRecord>,
 }
 
+impl Default for MultiDeviceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiDeviceManager {
     pub fn new() -> Self {
         Self {

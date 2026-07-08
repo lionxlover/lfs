@@ -27,7 +27,7 @@ impl CloneManager {
     where
         F: FnMut(&mut TxContext) -> Result<u64>,
     {
-        if let Some(_) = self.tree.lookup(ctx, &clone_id)? {
+        if self.tree.lookup(ctx, &clone_id)?.is_some() {
             return Err(Error::new(ErrorKind::AlreadyExists, "Clone ID already exists"));
         }
 
@@ -54,7 +54,7 @@ impl CloneManager {
         ctx: &mut TxContext,
         sb: &mut Superblock,
         clone_id: u64,
-        allocate_block: &mut F,
+        _allocate_block: &mut F,
     ) -> Result<()>
     where
         F: FnMut(&mut TxContext) -> Result<u64>,

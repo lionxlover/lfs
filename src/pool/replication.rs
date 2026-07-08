@@ -1,5 +1,11 @@
 pub struct ReplicationManager;
 
+impl Default for ReplicationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReplicationManager {
     pub fn new() -> Self {
         Self {}

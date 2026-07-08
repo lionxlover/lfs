@@ -1,7 +1,6 @@
-use std::io::{Result, Error, ErrorKind};
+use std::io::{Result, Error};
 use crate::transaction::transaction::TxContext;
 use crate::btree::tree::BTree;
-use crate::ondisk::serialization::Superblock;
 
 pub const FREESPACE_TREE_NODE_TYPE: u32 = 4;
 
@@ -31,6 +30,6 @@ impl FreeSpaceTree {
 
     pub fn remove_free_space(&mut self, _ctx: &mut TxContext, _physical_start: u64) -> Result<()> {
         // Requires btree.remove() which is not yet implemented.
-        Err(Error::new(ErrorKind::Other, "BTree remove not implemented"))
+        Err(Error::other("BTree remove not implemented"))
     }
 }

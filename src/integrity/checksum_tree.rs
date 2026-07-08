@@ -1,8 +1,7 @@
-use std::io::{Result, Error, ErrorKind};
+use std::io::{Result, Error};
 use bytemuck::{Pod, Zeroable};
 use crate::transaction::transaction::TxContext;
 use crate::btree::tree::BTree;
-use crate::integrity::algorithms::ChecksumAlgorithm;
 
 pub const CHECKSUM_TREE_NODE_TYPE: u32 = 5;
 
@@ -75,7 +74,7 @@ impl ChecksumTree {
             // Wait, our btree.insert currently does overwrite for existing keys!
             // Actually, we need allocate_block just in case, but overwrite doesn't allocate.
             let mut dummy_allocator = |_ctx: &mut TxContext| -> Result<u64> {
-                Err(Error::new(ErrorKind::Other, "Should not allocate on overwrite"))
+                Err(Error::other("Should not allocate on overwrite"))
             };
             self.btree.insert(ctx, *key, val, &mut dummy_allocator)?;
         }

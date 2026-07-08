@@ -14,7 +14,7 @@ impl InodeManager {
     pub fn write_inode(ctx: &mut TxContext, inode_tree_root: u64, inode: &Inode) -> Result<()> {
         let mut tree = InodeTree::new(inode_tree_root);
         // We need an allocator for tree splits
-        let mut allocator = |ctx: &mut TxContext| -> Result<u64> {
+        let mut allocator = |_ctx: &mut TxContext| -> Result<u64> {
             // Very rudimentary allocator for now; ideally we'd use FreeSpaceTree
             // but for simplicity, we will just grab a block from beyond the data region or 
             // from some tracked place. Actually, we shouldn't allocate from thin air.

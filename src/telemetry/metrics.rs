@@ -13,6 +13,12 @@ pub struct TelemetryMetrics {
     pub avg_write_latency_ns: AtomicU64,
 }
 
+impl Default for TelemetryMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TelemetryMetrics {
     pub fn new() -> Self {
         Self {

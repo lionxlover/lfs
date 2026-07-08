@@ -25,7 +25,7 @@ impl DirManager {
             }
             
             let header_bytes = &data[offset..offset + 16];
-            let header: DirEntryHeader = *bytemuck::from_bytes(header_bytes);
+            let header: DirEntryHeader = bytemuck::pod_read_unaligned(header_bytes);
             
             if header.rec_len == 0 {
                 break; // Corrupted or end of list
@@ -68,7 +68,7 @@ impl DirManager {
                 break;
             }
             let header_bytes = &data[offset..offset + 16];
-            let mut header: DirEntryHeader = *bytemuck::from_bytes(header_bytes);
+            let mut header: DirEntryHeader = bytemuck::pod_read_unaligned(header_bytes);
             
             if header.rec_len == 0 {
                 return Err(Error::new(ErrorKind::InvalidData, "Corrupt directory (rec_len=0)"));
@@ -105,7 +105,7 @@ impl DirManager {
                     FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, offset as u64, &current_bytes)?;
                     
                     // New entry
-                    let mut new_header = DirEntryHeader {
+                    let new_header = DirEntryHeader {
                         ino: target_ino,
                         rec_len: remainder,
                         name_len: name_bytes.len() as u8,
@@ -150,7 +150,7 @@ impl DirManager {
         while offset < data.len() {
             if offset + 16 > data.len() { break; }
             let header_bytes = &data[offset..offset + 16];
-            let mut header: DirEntryHeader = *bytemuck::from_bytes(header_bytes);
+            let mut header: DirEntryHeader = bytemuck::pod_read_unaligned(header_bytes);
             
             if header.rec_len == 0 { break; }
             

@@ -6,6 +6,12 @@ pub struct FsStats {
     pub uncompressed_bytes: u64,
 }
 
+impl Default for FsStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FsStats {
     pub fn new() -> Self {
         Self {

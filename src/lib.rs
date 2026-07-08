@@ -1,3 +1,11 @@
+#![allow(
+    clippy::module_inception,
+    clippy::too_many_arguments,
+    clippy::only_used_in_recursion,
+    clippy::needless_range_loop,
+    unused_assignments
+)]
+
 pub mod common;
 pub mod disk;
 pub mod ondisk;

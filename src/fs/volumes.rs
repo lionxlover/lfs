@@ -27,7 +27,7 @@ impl VolumeManager {
     where
         F: FnMut(&mut TxContext) -> Result<u64>,
     {
-        if let Some(_) = self.tree.lookup(ctx, &subvol_id)? {
+        if self.tree.lookup(ctx, &subvol_id)?.is_some() {
             return Err(Error::new(ErrorKind::AlreadyExists, "Subvolume ID already exists"));
         }
 
@@ -56,7 +56,7 @@ impl VolumeManager {
         ctx: &mut TxContext,
         sb: &mut Superblock,
         subvol_id: u64,
-        allocate_block: &mut F,
+        _allocate_block: &mut F,
     ) -> Result<()>
     where
         F: FnMut(&mut TxContext) -> Result<u64>,

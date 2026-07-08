@@ -59,10 +59,7 @@ impl Disk {
 
     pub fn write_blocks_parallel(&self, blocks: &[(u64, &[u8])]) -> Result<()> {
         let errors: Vec<_> = blocks.par_iter().filter_map(|(block_num, buf)| {
-            match self.write_block(*block_num, buf) {
-                Ok(_) => None,
-                Err(e) => Some(e),
-            }
+            self.write_block(*block_num, buf).err()
         }).collect();
         
         if let Some(err) = errors.into_iter().next() {

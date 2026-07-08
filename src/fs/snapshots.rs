@@ -2,7 +2,6 @@ use std::io::{Result, Error, ErrorKind};
 use crate::btree::tree::BTree;
 use crate::transaction::transaction::TxContext;
 use crate::ondisk::serialization::{Superblock, SnapshotRecord};
-use bytemuck::{bytes_of, from_bytes};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SNAPSHOT_TREE_NODE_TYPE: u32 = 8;
@@ -30,7 +29,7 @@ impl SnapshotManager {
         F: FnMut(&mut TxContext) -> Result<u64>,
     {
         // Check if snapshot ID already exists
-        if let Some(_) = self.tree.lookup(ctx, &snapshot_id)? {
+        if self.tree.lookup(ctx, &snapshot_id)?.is_some() {
             return Err(Error::new(ErrorKind::AlreadyExists, "Snapshot ID already exists"));
         }
 
@@ -78,7 +77,7 @@ impl SnapshotManager {
         &mut self,
         ctx: &mut TxContext,
         snapshot_id: u64,
-        allocate_block: &mut F,
+        _allocate_block: &mut F,
     ) -> Result<()>
     where
         F: FnMut(&mut TxContext) -> Result<u64>,

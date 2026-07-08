@@ -12,6 +12,12 @@ pub enum WorkloadProfile {
 
 pub struct WorkloadAnalyzer;
 
+impl Default for WorkloadAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkloadAnalyzer {
     pub fn new() -> Self {
         Self {}
@@ -27,8 +33,8 @@ impl WorkloadAnalyzer {
         }
 
         let read_ratio = reads as f64 / total_ops as f64;
-        let avg_read_bytes = if reads > 0 { metrics.read_bytes.load(Ordering::Relaxed) / reads } else { 0 };
-        let avg_write_bytes = if writes > 0 { metrics.write_bytes.load(Ordering::Relaxed) / writes } else { 0 };
+        let avg_read_bytes = metrics.read_bytes.load(Ordering::Relaxed).checked_div(reads).unwrap_or(0);
+        let avg_write_bytes = metrics.write_bytes.load(Ordering::Relaxed).checked_div(writes).unwrap_or(0);
 
         if avg_read_bytes > 1024 * 1024 && read_ratio > 0.8 {
             WorkloadProfile::MediaStreaming

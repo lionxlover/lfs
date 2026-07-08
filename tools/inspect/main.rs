@@ -10,7 +10,7 @@ fn main() {
     }
 
     let image_file = &args[1];
-    let mut disk = Disk::open(image_file).expect("Failed to open image file");
+    let disk = Disk::open(image_file).expect("Failed to open image file");
     
     let mut buf = [0u8; BLOCK_SIZE];
     disk.read_block(0, &mut buf).expect("Failed to read superblock");

@@ -26,6 +26,7 @@ rayon = "1.8"
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1.4"
 
 [lib]
 name = "lionfs_core"

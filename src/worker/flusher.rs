@@ -12,6 +12,12 @@ pub struct BackgroundFlusher {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+impl Default for BackgroundFlusher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackgroundFlusher {
     pub fn new() -> Self {
         let (sender, receiver) = unbounded();

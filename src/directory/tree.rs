@@ -1,7 +1,6 @@
 use std::io::{Result, Error, ErrorKind};
 use crate::transaction::transaction::TxContext;
 use crate::btree::tree::BTree;
-use crate::ondisk::serialization::Superblock;
 use bytemuck::{Pod, Zeroable};
 
 pub const DIR_TREE_NODE_TYPE: u32 = 2;

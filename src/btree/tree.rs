@@ -1,6 +1,6 @@
 use std::io::{Result, Error, ErrorKind};
 use std::marker::PhantomData;
-use bytemuck::{Pod, Zeroable, bytes_of, from_bytes, from_bytes_mut, bytes_of_mut};
+use bytemuck::{Pod, Zeroable, bytes_of, pod_read_unaligned};
 use crate::transaction::transaction::TxContext;
 use crate::btree::node::{BTreeNodeData, BTREE_PAYLOAD_SIZE, BTREE_MAGIC};
 use crate::integrity::algorithms::{calculate_checksum, ChecksumAlgorithm};
@@ -66,7 +66,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         
         let mut buf = [0u8; 4096];
         ctx.read_block(block_num, &mut buf)?;
-        let node: BTreeNodeData = *from_bytes(&buf);
+        let node: BTreeNodeData = pod_read_unaligned(&buf);
         
         if node.header.magic != BTREE_MAGIC || node.header.node_type != self.node_type {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid BTree node magic or type"));
@@ -151,7 +151,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             } else {
                 // Internal node
                 // Payload structure: [u64; leftmost_child], [KPtrPair; count]
-                let leftmost_ptr: u64 = *from_bytes(&node.payload[0..8]);
+                let leftmost_ptr: u64 = pod_read_unaligned(&node.payload[0..8]);
                 let items: &[KPtrPair<K>] = bytemuck::cast_slice(&node.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
                 
                 let mut next_block = leftmost_ptr;
@@ -189,12 +189,12 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             }
             
             let count = n.header.item_count as usize;
-            let leftmost_ptr: u64 = *from_bytes(&n.payload[0..8]);
+            let leftmost_ptr: u64 = pod_read_unaligned(&n.payload[0..8]);
             let items: &[KPtrPair<K>] = bytemuck::cast_slice(&n.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
             
             let mut next_block = leftmost_ptr;
             for kv in items {
-                if &key >= &kv.key {
+                if key >= kv.key {
                     next_block = kv.ptr;
                 } else {
                     break;
@@ -264,7 +264,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         
         let old_items: &[KVPair<K, V>] = bytemuck::cast_slice(&leaf_node.payload[..count * std::mem::size_of::<KVPair<K, V>>()]);
         let right_items = &old_items[mid..];
-        let promote_key = right_items[0].key.clone();
+        let promote_key = right_items[0].key;
         
         let right_bytes = bytemuck::cast_slice(right_items);
         right_node.payload[..right_bytes.len()].copy_from_slice(right_bytes);
@@ -309,7 +309,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         let mut parent_node = self.read_node(ctx, parent_block)?;
         let count = parent_node.header.item_count as usize;
 
-        let mut items = vec![KPtrPair { key: key.clone(), ptr: 0 }; count + 1];
+        let mut items = vec![KPtrPair { key, ptr: 0 }; count + 1];
         let old_items: &[KPtrPair<K>] = bytemuck::cast_slice(&parent_node.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
         
         let insert_idx = match old_items.binary_search_by(|kv| kv.key.cmp(&key)) {
@@ -320,7 +320,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         if insert_idx > 0 {
             items[..insert_idx].copy_from_slice(&old_items[..insert_idx]);
         }
-        items[insert_idx] = KPtrPair { key: key.clone(), ptr: right_block };
+        items[insert_idx] = KPtrPair { key, ptr: right_block };
         if insert_idx < count {
             items[insert_idx + 1..].copy_from_slice(&old_items[insert_idx..]);
         }
@@ -335,7 +335,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             let mid = total / 2;
             let right_count = total - mid - 1; // 1 goes up
             
-            let promote_up_key = items[mid].key.clone();
+            let promote_up_key = items[mid].key;
             
             // Leftmost ptr of right internal is the ptr of the promoted key
             let right_leftmost_ptr: [u8; 8] = bytemuck::cast(items[mid].ptr);
@@ -389,7 +389,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             }
             
             let count = n.header.item_count as usize;
-            let leftmost_ptr: u64 = *from_bytes(&n.payload[0..8]);
+            let leftmost_ptr: u64 = pod_read_unaligned(&n.payload[0..8]);
             let items: &[KPtrPair<K>] = bytemuck::cast_slice(&n.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
             
             let mut next_block = leftmost_ptr;
@@ -450,7 +450,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         let item_count = node.header.item_count as usize;
         
         if node.header.level > 0 {
-            let leftmost_ptr: u64 = *from_bytes(&node.payload[0..8]);
+            let leftmost_ptr: u64 = pod_read_unaligned(&node.payload[0..8]);
             if leftmost_ptr != 0 {
                 count += self.validate_node(ctx, leftmost_ptr, depth + 1)?;
             }

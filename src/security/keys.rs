@@ -15,6 +15,12 @@ pub struct KeyManager {
     // Manages master and subvolume keys in memory
 }
 
+impl Default for KeyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyManager {
     pub fn new() -> Self {
         Self {}

@@ -8,6 +8,12 @@ pub struct PredictiveReadEngine {
     transitions: Mutex<HashMap<u64, (u64, u8)>>,
 }
 
+impl Default for PredictiveReadEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PredictiveReadEngine {
     pub fn new() -> Self {
         Self {

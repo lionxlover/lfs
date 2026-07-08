@@ -2,7 +2,7 @@ use std::io::Result;
 use crate::disk::block_io::Disk;
 use crate::ondisk::serialization::{Superblock, JournalHeader, JournalRecordHeader, JournalFooter, JOURNAL_MAGIC, BLOCK_SIZE};
 use crate::utils::crc::compute_checksum;
-use bytemuck::{bytes_of, from_bytes};
+use bytemuck::{bytes_of, pod_read_unaligned};
 use std::collections::BTreeMap;
 
 pub struct RecoveryManager;
@@ -26,7 +26,7 @@ impl RecoveryManager {
             let magic = u64::from_le_bytes(buffer[0..8].try_into().unwrap());
             if magic == JOURNAL_MAGIC {
                 // Determine if it's a Header
-                let mut header: JournalHeader = *from_bytes(&buffer);
+                let mut header: JournalHeader = pod_read_unaligned(&buffer);
                 let saved_checksum = header.checksum;
                 header.checksum = 0;
                 
@@ -44,7 +44,7 @@ impl RecoveryManager {
                         
                         let rec_p_block = sb.journal_start + temp_block;
                         disk.read_block(rec_p_block, &mut buffer)?;
-                        let rec_header: JournalRecordHeader = *from_bytes(&buffer);
+                        let rec_header: JournalRecordHeader = pod_read_unaligned(&buffer);
                         temp_block += 1;
                         
                         if temp_block >= sb.journal_blocks {
@@ -68,7 +68,7 @@ impl RecoveryManager {
                     if valid && temp_block < sb.journal_blocks {
                         let footer_p_block = sb.journal_start + temp_block;
                         disk.read_block(footer_p_block, &mut buffer)?;
-                        let mut footer: JournalFooter = *from_bytes(&buffer);
+                        let mut footer: JournalFooter = pod_read_unaligned(&buffer);
                         let footer_checksum = footer.checksum;
                         footer.checksum = 0;
                         

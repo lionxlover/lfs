@@ -11,7 +11,7 @@ impl Allocator {
             return Err(Error::new(ErrorKind::InvalidInput, "Cannot allocate 0 blocks"));
         }
 
-        let total_bitmap_blocks = (blocks_per_group as u64 + (BLOCK_SIZE as u64 * 8) - 1) / (BLOCK_SIZE as u64 * 8);
+        let total_bitmap_blocks = (blocks_per_group as u64).div_ceil(BLOCK_SIZE as u64 * 8);
         let mut buf = [0u8; BLOCK_SIZE];
 
         let mut current_run = 0;
@@ -88,6 +88,8 @@ impl Allocator {
                 ctx.read_block(bitmap_start + bm_idx, &mut buf)?;
                 current_bm_idx = bm_idx;
                 modified = false;
+            } else {
+                // Do nothing
             }
 
             if set {

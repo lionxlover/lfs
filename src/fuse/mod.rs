@@ -1,8 +1,13 @@
 use fuser::{Filesystem, Request, ReplyAttr, ReplyEntry, ReplyData, ReplyDirectory, ReplyWrite};
 use std::ffi::OsStr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct LionFsFuse;
+
+impl Default for LionFsFuse {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LionFsFuse {
     pub fn new() -> Self {

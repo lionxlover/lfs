@@ -8,6 +8,12 @@ pub struct GcWorker {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+impl Default for GcWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GcWorker {
     pub fn new() -> Self {
         Self {

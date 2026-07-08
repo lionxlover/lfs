@@ -21,6 +21,12 @@ pub struct DeduplicationManager {
     // Manages background deduplication processing
 }
 
+impl Default for DeduplicationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeduplicationManager {
     pub fn new() -> Self {
         Self {}

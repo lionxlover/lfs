@@ -57,8 +57,8 @@ pub fn verify_checksum(algo: ChecksumAlgorithm, data: &[u8], expected: &[u8; 32]
     // Only compare the relevant bytes depending on algorithm
     match algo {
         ChecksumAlgorithm::None => true,
-        ChecksumAlgorithm::Crc32c => &computed[0..4] == &expected[0..4],
-        ChecksumAlgorithm::XxHash64 => &computed[0..8] == &expected[0..8],
+        ChecksumAlgorithm::Crc32c => computed[0..4] == expected[0..4],
+        ChecksumAlgorithm::XxHash64 => computed[0..8] == expected[0..8],
         ChecksumAlgorithm::Sha256 => &computed == expected,
     }
 }

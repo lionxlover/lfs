@@ -43,7 +43,7 @@ impl FileManager {
                             if bad_blocks_root != 0 {
                                 let mut bb_mgr = BadBlockManager::new(bad_blocks_root);
                                 let mut dummy_allocator = |_ctx: &mut TxContext| -> Result<u64> {
-                                    Err(Error::new(ErrorKind::Other, "Should not allocate during bad block marking in read"))
+                                    Err(Error::other("Should not allocate during bad block marking in read"))
                                 };
                                 let _ = bb_mgr.mark_bad_block(ctx, physical_block, inode.ino, &mut dummy_allocator);
                             }
@@ -88,7 +88,7 @@ impl FileManager {
             let mut buf = [0u8; BLOCK_SIZE];
             
             let chunk_size = min(
-                (BLOCK_SIZE - block_offset),
+                BLOCK_SIZE - block_offset ,
                 data.len() - data_pos
             );
             
@@ -124,7 +124,7 @@ impl FileManager {
                 };
                 
                 let mut dummy_allocator = |_ctx: &mut TxContext| -> Result<u64> {
-                    Err(Error::new(ErrorKind::Other, "Not expecting allocation in ChecksumTree overwrite for now"))
+                    Err(Error::other("Not expecting allocation in ChecksumTree overwrite for now"))
                 };
                 // NOTE: Proper allocation lambda needed if tree grows
                 let _ = csum_tree.insert_checksum(ctx, key, val, &mut dummy_allocator);
@@ -148,7 +148,7 @@ impl FileManager {
             return Ok(());
         }
         
-        let new_blocks = (new_size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+        let new_blocks = new_size.div_ceil(BLOCK_SIZE as u64);
         
         // Remove and free extents that are fully beyond new_blocks
         let mut new_extent_count = 0;
@@ -215,6 +215,11 @@ impl FileManager {
             inode.extent_count += 1;
             Ok(())
         } else {
+            eprintln!("Max inline extents reached! ino: {}, logical_block: {}, physical_block: {}, length: {}", inode.ino, logical_block, physical_block, length);
+            for i in 0..inode.extent_count as usize {
+                let e = &inode.extents[i];
+                eprintln!("  extent {}: log_start: {}, phys_start: {}, len: {}", i, e.logical_start, e.physical_start, e.length);
+            }
             Err(Error::new(ErrorKind::OutOfMemory, "Max inline extents reached (Phase 1 limit)"))
         }
     }

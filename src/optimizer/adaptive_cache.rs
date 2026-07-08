@@ -5,6 +5,12 @@ pub struct AdaptiveCacheManager {
     pub max_extents: usize,
 }
 
+impl Default for AdaptiveCacheManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdaptiveCacheManager {
     pub fn new() -> Self {
         Self {

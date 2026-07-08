@@ -1,32 +1,29 @@
+#![allow(clippy::collapsible_if, clippy::manual_div_ceil, clippy::unnecessary_cast)]
+
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fuser::{
     Filesystem, Request, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyData, ReplyWrite,
     ReplyCreate, ReplyEmpty, FileAttr, FileType,
 };
-use libc::{ENOENT, EIO, ENOSPC, ENOTEMPTY, EEXIST};
+use libc::{ENOENT, EIO};
+use std::sync::Arc;
 use crate::disk::block_io::Disk;
 use crate::ondisk::serialization::{Superblock, Inode, BLOCK_SIZE, LIONFS_MAGIC};
-use bytemuck::{from_bytes, bytes_of};
+use bytemuck::{pod_read_unaligned, bytes_of};
 use crate::transaction::manager::TransactionManager;
-use crate::transaction::transaction::{Transaction, TxContext};
-use crate::inode::manager::InodeManager;
-use crate::directory::entries::DirManager;
-use crate::file::writer::FileManager;
+use crate::transaction::transaction::{TxContext, Transaction};
 
 const TTL: Duration = Duration::from_secs(1);
 
 use crate::cache::inode_cache::InodeCache;
-use crate::cache::dir_cache::DirCache;
-use crate::cache::extent_cache::ExtentCache;
 
 pub struct LionFS {
-    disk: Disk,
+    pub disk: Arc<Disk>,
     pub superblock: Superblock,
-    tx_manager: TransactionManager,
+    pub tx_manager: TransactionManager,
+    pub active_tx: Option<Transaction>,
     inode_cache: InodeCache,
-    dir_cache: DirCache,
-    extent_cache: ExtentCache,
     scrubber: crate::worker::scrubber::ScrubberWorker,
     image_path: String,
 }
@@ -39,7 +36,7 @@ impl LionFS {
         let candidate_locations = [0, 8192, 16384];
         for &loc in &candidate_locations {
             if disk.read_block(loc, &mut buffer).is_ok() {
-                let sb: Superblock = *from_bytes(&buffer);
+                let sb: Superblock = pod_read_unaligned(&buffer);
                 if sb.magic == LIONFS_MAGIC {
                     let mut sb_copy = sb;
                     let saved_checksum = sb_copy.checksum;
@@ -66,30 +63,27 @@ impl LionFS {
         let highest_tx = crate::recovery::recovery::RecoveryManager::recover(&mut disk, &superblock)?;
         let tx_manager = TransactionManager::new(&superblock);
         
-        let mut tx_manager = tx_manager;
+
         if highest_tx > tx_manager.current_tx_id.load(std::sync::atomic::Ordering::SeqCst) {
             tx_manager.current_tx_id.store(highest_tx, std::sync::atomic::Ordering::SeqCst);
         }
 
         let inode_cache = InodeCache::new(10000);
-        let dir_cache = DirCache::new(10000);
-        let extent_cache = ExtentCache::new(10000);
         
-        let mut scrubber = crate::worker::scrubber::ScrubberWorker::new();
+        let scrubber = crate::worker::scrubber::ScrubberWorker::new();
         // Background workers are initialized but waiting
         
         Ok(Self { 
-            disk, 
+            disk: Arc::new(disk), 
             superblock, 
-            tx_manager, 
+            tx_manager,
+            active_tx: None,
             inode_cache, 
-            dir_cache, 
-            extent_cache,
             scrubber,
             image_path,
         })
     }
-    
+
     fn get_bg_desc(&self) -> crate::ondisk::serialization::BlockGroupDescriptor {
         crate::ondisk::serialization::BlockGroupDescriptor {
             bg_block_bitmap: self.superblock.bitmap_start,
@@ -107,25 +101,19 @@ impl LionFS {
         if let Some(inode) = self.inode_cache.get(ino) {
             return Ok(inode);
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
-        let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+        let mut temp_tx = Transaction::new(0, 0);
+        let tx = if let Some(ref mut act_tx) = self.active_tx {
+            act_tx
+        } else {
+            &mut temp_tx
+        };
+        let mut ctx = TxContext::new(&self.disk, tx);
         let inode = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino)?;
         self.inode_cache.insert(ino, inode, false);
         Ok(inode)
     }
     
-    fn write_inode(&mut self, inode: &Inode) -> std::io::Result<()> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
-        {
-            let mut ctx = TxContext::new(&mut self.disk, &mut tx);
-            crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, inode)?;
-        }
-        self.tx_manager.commit(&mut self.disk, &self.superblock, &tx)?;
-        self.inode_cache.insert(inode.ino, *inode, false);
-        Ok(())
-    }
+
 
     fn to_file_attr(&self, inode: &Inode) -> FileAttr {
         let kind = if inode.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
@@ -200,8 +188,16 @@ impl Filesystem for LionFS {
             }
         }
 
-        let mut tx = self.tx_manager.begin(0);
-        let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+        let mut temp_tx = Transaction::new(0, 0);
+        let bg_desc = self.get_bg_desc();
+        
+        let mut temp_tx = Transaction::new(0, 0);
+        let tx = if let Some(ref mut act_tx) = self.active_tx {
+            act_tx
+        } else {
+            &mut temp_tx
+        };
+        let mut ctx = TxContext::new(&self.disk, tx);
         
         if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
             if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode) {
@@ -232,8 +228,13 @@ impl Filesystem for LionFS {
     }
 
     fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        let mut tx = self.tx_manager.begin(0);
-        let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+        let mut temp_tx = Transaction::new(0, 0);
+        let tx = if let Some(ref mut act_tx) = self.active_tx {
+            act_tx
+        } else {
+            &mut temp_tx
+        };
+        let mut ctx = TxContext::new(&self.disk, tx);
         
         if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
             if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut inode) {
@@ -265,12 +266,18 @@ impl Filesystem for LionFS {
     }
 
     fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+        let mut temp_tx = Transaction::new(0, 0);
+        let tx = if let Some(ref mut act_tx) = self.active_tx {
+            act_tx
+        } else {
+            &mut temp_tx
+        };
+        let mut ctx = TxContext::new(&self.disk, tx);
+
         if ino == 999999 || ino == 999998 {
             let data = if ino == 999999 {
                 self.scrubber.get_status().into_bytes()
             } else {
-                let mut tx = self.tx_manager.begin(0);
-                let mut ctx = TxContext::new(&mut self.disk, &mut tx);
                 crate::integrity::bad_blocks::BadBlockManager::get_health_report(&mut ctx, self.superblock.bad_blocks_root).into_bytes()
             };
             
@@ -284,8 +291,13 @@ impl Filesystem for LionFS {
             return;
         }
 
-        let mut tx = self.tx_manager.begin(0);
-        let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+        let mut temp_tx = Transaction::new(0, 0);
+        let tx = if let Some(ref mut act_tx) = self.active_tx {
+            act_tx
+        } else {
+            &mut temp_tx
+        };
+        let mut ctx = TxContext::new(&self.disk, tx);
         if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
             if let Ok(data) = crate::file::writer::FileManager::read_file(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut inode, offset as u64, size as u64) {
                 reply.data(&data);
@@ -309,13 +321,18 @@ impl Filesystem for LionFS {
         }
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
+        
         let mut success = false;
         let mut bytes_written = 0;
+        let mut commit_now = false;
         
         {
             let bg_desc = self.get_bg_desc();
-            let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+            if self.active_tx.is_none() {
+                self.active_tx = Some(self.tx_manager.begin(now));
+            }
+            let tx = self.active_tx.as_mut().unwrap();
+            let mut ctx = TxContext::new(&self.disk, tx);
             if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
                 if let Ok(()) = crate::file::writer::FileManager::write_file(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, &mut inode, offset as u64, data) {
                     inode.mtime = now as i64;
@@ -324,26 +341,54 @@ impl Filesystem for LionFS {
                     bytes_written = data.len() as u32;
                 }
             }
+            if let Some(tx) = &self.active_tx {
+                if tx.dirty_blocks.len() > 1024 {
+                    commit_now = true;
+                }
+            }
         }
         
         if success {
-            if self.tx_manager.commit(&mut self.disk, &self.superblock, &tx).is_ok() {
-                reply.written(bytes_written);
-                return;
+            if commit_now {
+                if let Some(tx) = self.active_tx.take() {
+                    let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
+                }
             }
+            reply.written(bytes_written);
+            return;
         }
         reply.error(EIO);
     }
 
+    fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        if let Some(tx) = self.active_tx.take() {
+            let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
+        }
+        reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        if let Some(tx) = self.active_tx.take() {
+            let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
+            let _ = self.disk.sync();
+        } else {
+            let _ = self.disk.sync();
+        }
+        reply.ok();
+    }
+
     fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
         let mut success = false;
         let mut final_inode = None;
         
         {
             let bg_desc = self.get_bg_desc();
-            let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+            if self.active_tx.is_none() {
+                self.active_tx = Some(self.tx_manager.begin(now));
+            }
+            let tx = self.active_tx.as_mut().unwrap();
+            let mut ctx = TxContext::new(&self.disk, tx);
             if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
                 if let Ok(new_ino) = crate::inode::manager::InodeManager::allocate_inode(&mut self.superblock) {
                     let mut new_inode = Inode {
@@ -354,7 +399,7 @@ impl Filesystem for LionFS {
                         links_count: 2,
                         flags: 0,
                         padding1: 0,
-                        size: BLOCK_SIZE as u64,
+                        size: 0,
                         ctime: now as i64,
                         mtime: now as i64,
                         atime: now as i64,
@@ -385,23 +430,27 @@ impl Filesystem for LionFS {
         }
         
         if success {
-            if self.tx_manager.commit(&mut self.disk, &self.superblock, &tx).is_ok() {
-                reply.entry(&TTL, &self.to_file_attr(&final_inode.unwrap()), 0);
-                return;
+            if let Some(tx) = self.active_tx.take() {
+                let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
             }
+            reply.entry(&TTL, &self.to_file_attr(&final_inode.unwrap()), 0);
+            return;
         }
         reply.error(EIO);
     }
 
     fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
         let mut success = false;
         let mut final_inode = None;
 
         {
             let bg_desc = self.get_bg_desc();
-            let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+            if self.active_tx.is_none() {
+                self.active_tx = Some(self.tx_manager.begin(now));
+            }
+            let tx = self.active_tx.as_mut().unwrap();
+            let mut ctx = TxContext::new(&self.disk, tx);
             if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
                 if let Ok(new_ino) = crate::inode::manager::InodeManager::allocate_inode(&mut self.superblock) {
                     let new_inode = Inode {
@@ -439,35 +488,39 @@ impl Filesystem for LionFS {
         }
         
         if success {
-            if self.tx_manager.commit(&mut self.disk, &self.superblock, &tx).is_ok() {
-                reply.created(&TTL, &self.to_file_attr(&final_inode.unwrap()), 0, 0, 0);
-                return;
+            if let Some(tx) = self.active_tx.take() {
+                let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
             }
+            reply.created(&TTL, &self.to_file_attr(&final_inode.unwrap()), 0, 0, 0);
+            return;
         }
         reply.error(EIO);
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut tx = self.tx_manager.begin(now);
         let mut success = false;
         
         {
             let bg_desc = self.get_bg_desc();
-            let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+            if self.active_tx.is_none() {
+                self.active_tx = Some(self.tx_manager.begin(now));
+            }
+            let tx = self.active_tx.as_mut().unwrap();
+            let mut ctx = TxContext::new(&self.disk, tx);
             if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
                 if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode, name) {
-                    if let Ok(mut target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, target_ino) {
+                    if let Ok(mut target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, target_ino) {
                         target_inode.links_count -= 1;
                         if target_inode.links_count == 0 {
                             target_inode.mode = 0; // free inode
-                            let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_table_start, &target_inode);
+                            let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &target_inode);
                         } else {
-                            let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_table_start, &target_inode);
+                            let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &target_inode);
                         }
                         
                         parent_inode.mtime = now as i64;
-                        let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_table_start, &parent_inode);
+                        let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &parent_inode);
                         success = true;
                     }
                 }
@@ -475,10 +528,11 @@ impl Filesystem for LionFS {
         }
         
         if success {
-            if self.tx_manager.commit(&mut self.disk, &self.superblock, &tx).is_ok() {
-                reply.ok();
-                return;
+            if let Some(tx) = self.active_tx.take() {
+                let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
             }
+            reply.ok();
+            return;
         }
         reply.error(ENOENT);
     }
@@ -486,19 +540,22 @@ impl Filesystem for LionFS {
     fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
         if parent == newparent {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            let mut tx = self.tx_manager.begin(now);
             let mut success = false;
             
             {
                 let bg_desc = self.get_bg_desc();
-                let mut ctx = TxContext::new(&mut self.disk, &mut tx);
-                if let Ok(mut p_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, parent) {
+                if self.active_tx.is_none() {
+                    self.active_tx = Some(self.tx_manager.begin(now));
+                }
+                let tx = self.active_tx.as_mut().unwrap();
+                let mut ctx = TxContext::new(&self.disk, tx);
+                if let Ok(mut p_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
                     if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut p_inode, name) {
-                        if let Ok(target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, target_ino) {
+                        if let Ok(target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, target_ino) {
                             let file_type = if (target_inode.mode & libc::S_IFDIR) != 0 { 2 } else { 1 };
                             if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut p_inode, newname, target_ino, file_type).is_ok() {
                                 p_inode.mtime = now as i64;
-                                let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_table_start, &p_inode);
+                                let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &p_inode);
                                 success = true;
                             }
                         }
@@ -507,10 +564,11 @@ impl Filesystem for LionFS {
             }
             
             if success {
-                if self.tx_manager.commit(&mut self.disk, &self.superblock, &tx).is_ok() {
-                    reply.ok();
-                    return;
+                if let Some(tx) = self.active_tx.take() {
+                    let _ = self.tx_manager.commit(&self.disk, &self.superblock, &tx);
                 }
+                reply.ok();
+                return;
             }
         }
         reply.error(ENOENT);

@@ -10,6 +10,12 @@ pub struct PerCpuAllocatorCache {
     misses: AtomicU64,
 }
 
+impl Default for PerCpuAllocatorCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerCpuAllocatorCache {
     pub fn new() -> Self {
         // Since std doesn't natively expose cpu ids easily, we use thread_id hashing or round-robin as a proxy.

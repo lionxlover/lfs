@@ -10,7 +10,7 @@ use std::fs;
 fn main() {
     let test_file = "test_bench.img";
     let _ = fs::remove_file(test_file);
-    let mut disk = Disk::create(test_file, 1024 * 1024 * 100).unwrap(); // 100MB
+    let disk = Disk::create(test_file, 1024 * 1024 * 100).unwrap(); // 100MB
     
     let sb = Superblock {
         magic: 0, version: 0, block_size: 4096, total_blocks: 10240, free_blocks: 0, inode_count: 0,
@@ -35,9 +35,9 @@ fn main() {
     };
     disk.write_block(0, bytemuck::bytes_of(&sb)).unwrap();
 
-    let mut tm = TransactionManager::new(&sb);
+    let tm = TransactionManager::new(&sb);
     let mut tx = tm.begin(0);
-    let mut ctx = TxContext::new(&mut disk, &mut tx);
+    let mut ctx = TxContext::new(&disk, &mut tx);
     BTree::<u64, Inode>::init_empty(&mut ctx, 12, INODE_TREE_NODE_TYPE).unwrap();
     let mut tree = BTree::<u64, Inode>::new(12, INODE_TREE_NODE_TYPE);
 

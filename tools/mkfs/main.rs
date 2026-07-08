@@ -1,10 +1,16 @@
-use std::env;
+#![allow(clippy::manual_div_ceil, clippy::unnecessary_cast)]
+
+
 use lionfs_core::disk::block_io::Disk;
-use lionfs_core::ondisk::serialization::{Superblock, Inode, BLOCK_SIZE, LIONFS_MAGIC};
+use lionfs_core::ondisk::serialization::{Superblock, Inode, BLOCK_SIZE, LIONFS_MAGIC, MAX_INLINE_EXTENTS};
+use lionfs_core::transaction::manager::TransactionManager;
+use lionfs_core::transaction::transaction::TxContext;
+use lionfs_core::btree::tree::BTree;
+use lionfs_core::inode::tree::INODE_TREE_NODE_TYPE;
 
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: mkfs-lfs <image_file> <size_in_mb>");
         std::process::exit(1);
@@ -21,8 +27,8 @@ fn main() {
 
     // Calculate layout
     let bitmap_blocks = (total_blocks + (BLOCK_SIZE as u64 * 8) - 1) / (BLOCK_SIZE as u64 * 8);
-    let inode_count = 1024; // Fixed for now
-    let inodes_per_block = BLOCK_SIZE as u64 / 256;
+    let inode_count: u64 = 1024; // Fixed for now
+    let inodes_per_block = BLOCK_SIZE as u64 / std::mem::size_of::<Inode>() as u64;
     let inode_blocks = (inode_count + inodes_per_block - 1) / inodes_per_block;
     
     let bitmap_start = 1;
@@ -31,7 +37,7 @@ fn main() {
 
     println!("Formatting {} with size {}MB ({} blocks)", image_file, size_mb, total_blocks);
 
-    let mut disk = Disk::create(image_file, total_blocks * BLOCK_SIZE as u64).unwrap();
+    let disk = Disk::create(image_file, total_blocks * BLOCK_SIZE as u64).unwrap();
 
     let secondary_sb_1 = if total_blocks > 8192 { 8192 } else { 0 };
     let secondary_sb_2 = if total_blocks > 16384 { 16384 } else { 0 };
@@ -65,12 +71,12 @@ fn main() {
         secondary_sb_2: 16384,
         block_group_count: 1,
         blocks_per_group: total_blocks as u32,
-        inode_tree_root: 0,
+        inode_tree_root: 12, // Block 12 for BTree root
         dir_tree_root: 0,
         extent_tree_root: 0,
         freespace_tree_root: 0,
         next_ino: 2,
-        checksum_tree_root: 0,
+        checksum_tree_root: 13, // Maybe another block
         bad_blocks_root: 0,
         snapshot_tree_root: 0,
         clone_tree_root: 0,
@@ -146,14 +152,25 @@ fn main() {
         compression_algo: 0,
         encryption_algo: 0,
         key_id: 0,
-        extents: [lionfs_core::ondisk::serialization::Extent { logical_start: 0, physical_start: 0, length: 0 }; 7],
+        extents: [lionfs_core::ondisk::serialization::Extent { logical_start: 0, physical_start: 0, length: 0 }; MAX_INLINE_EXTENTS],
         checksum: 0,
         padding4: [0; 12],
     };
     
-    let mut root_buf = [0u8; BLOCK_SIZE];
-    root_buf[256..512].copy_from_slice(bytemuck::bytes_of(&root_inode)); // index 1 = offset 256
-    disk.write_block(inode_table_start, &root_buf).unwrap();
+    // Use proper BTree to store the root inode
+    let tm = TransactionManager::new(&sb);
+    let mut tx = tm.begin(0);
+    {
+        let mut ctx = TxContext::new(&disk, &mut tx);
+        BTree::<u64, Inode>::init_empty(&mut ctx, sb.inode_tree_root, INODE_TREE_NODE_TYPE).unwrap();
+        let mut tree = BTree::<u64, Inode>::new(sb.inode_tree_root, INODE_TREE_NODE_TYPE);
+        
+        let mut mock_allocator = |_ctx: &mut TxContext| -> std::io::Result<u64> {
+            Ok(20) 
+        };
+        tree.insert(&mut ctx, 1, root_inode, &mut mock_allocator).unwrap();
+    }
+    tm.commit(&disk, &sb, &tx).unwrap();
 
     disk.sync().unwrap();
     println!("Format complete!");

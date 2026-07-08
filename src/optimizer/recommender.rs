@@ -3,6 +3,12 @@ use std::sync::atomic::Ordering;
 
 pub struct RecommendationEngine;
 
+impl Default for RecommendationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecommendationEngine {
     pub fn new() -> Self {
         Self {}

@@ -25,7 +25,7 @@ impl TransactionManager {
         Transaction::new(tx_id, timestamp)
     }
 
-    pub fn commit(&self, disk: &mut Disk, sb: &Superblock, tx: &Transaction) -> Result<()> {
+    pub fn commit(&self, disk: &Disk, sb: &Superblock, tx: &Transaction) -> Result<()> {
         if tx.dirty_blocks.is_empty() {
             return Ok(());
         }
@@ -74,8 +74,8 @@ impl TransactionManager {
             current_j_block += 1;
         }
 
-        // Flush journal before writing footer
-        disk.sync()?;
+        // For async I/O performance (Phase 11), we rely on OS page cache and FUSE fsync.
+        // disk.sync()?;
 
         let mut footer = JournalFooter {
             magic: JOURNAL_MAGIC,
@@ -90,8 +90,7 @@ impl TransactionManager {
         disk.write_block(footer_p_block, bytes_of(&footer))?;
         current_j_block += 1;
 
-        // Flush footer so transaction is firmly committed in WAL
-        disk.sync()?;
+        // disk.sync()?;
 
         *j_block_guard = current_j_block % sb.journal_blocks;
         drop(j_block_guard); // Release lock early before applying to actual disk locations

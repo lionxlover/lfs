@@ -13,6 +13,12 @@ pub struct ScrubberWorker {
     pub handle: Option<thread::JoinHandle<()>>,
 }
 
+impl Default for ScrubberWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScrubberWorker {
     pub fn new() -> Self {
         Self {
@@ -33,7 +39,7 @@ impl ScrubberWorker {
         *active_clone.lock().unwrap() = true;
 
         let handle = thread::spawn(move || {
-            let mut disk = match crate::disk::block_io::Disk::open(&image_path) {
+            let _disk = match crate::disk::block_io::Disk::open(&image_path) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("[Scrub Worker] Failed to open disk for scrubbing: {}", e);
