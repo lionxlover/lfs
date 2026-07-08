@@ -4,10 +4,14 @@ use crate::transaction::transaction::TxContext;
 use crate::ondisk::serialization::{Inode, Extent, BLOCK_SIZE, MAX_INLINE_EXTENTS, BlockGroupDescriptor};
 use crate::allocator::bitmap::Allocator;
 
+use crate::integrity::algorithms::{ChecksumAlgorithm, calculate_checksum, verify_checksum};
+use crate::integrity::checksum_tree::{ChecksumTree, ChecksumTreeKey, ChecksumTreeValue};
+use crate::integrity::bad_blocks::{BadBlockManager};
+
 pub struct FileManager;
 
 impl FileManager {
-    pub fn read_file(ctx: &mut TxContext, inode: &Inode, offset: u64, size: u64) -> Result<Vec<u8>> {
+    pub fn read_file(ctx: &mut TxContext, checksum_tree_root: u64, bad_blocks_root: u64, inode: &mut Inode, offset: u64, size: u64) -> Result<Vec<u8>> {
         if offset >= inode.size {
             return Ok(Vec::new());
         }
@@ -26,6 +30,28 @@ impl FileManager {
             
             if physical_block != 0 {
                 ctx.read_block(physical_block, &mut buf)?;
+                
+                // Verify Checksum
+                if checksum_tree_root != 0 {
+                    let csum_tree = ChecksumTree::new(checksum_tree_root);
+                    let key = ChecksumTreeKey { object_id: inode.ino, logical_block };
+                    if let Ok(Some(val)) = csum_tree.lookup_checksum(ctx, &key) {
+                        let algo = ChecksumAlgorithm::from_u8(val.algorithm_id);
+                        if !verify_checksum(algo, &buf, &val.checksum_bytes) {
+                            // Corruption detected!
+                            eprintln!("CORRUPTION DETECTED: Inode {}, Logical Block {}", inode.ino, logical_block);
+                            if bad_blocks_root != 0 {
+                                let mut bb_mgr = BadBlockManager::new(bad_blocks_root);
+                                let mut dummy_allocator = |_ctx: &mut TxContext| -> Result<u64> {
+                                    Err(Error::new(ErrorKind::Other, "Should not allocate during bad block marking in read"))
+                                };
+                                let _ = bb_mgr.mark_bad_block(ctx, physical_block, inode.ino, &mut dummy_allocator);
+                            }
+                            // Do not return corrupted data
+                            return Err(Error::new(ErrorKind::InvalidData, "Checksum mismatch on read"));
+                        }
+                    }
+                }
             } // if 0, it's a hole, leave buf as 0s
             
             let chunk_size = min(
@@ -43,7 +69,7 @@ impl FileManager {
         Ok(data)
     }
 
-    pub fn write_file(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write_file(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, checksum_tree_root: u64, inode: &mut Inode, offset: u64, data: &[u8]) -> Result<()> {
         let mut data_pos = 0;
         let mut current_offset = offset;
         
@@ -68,6 +94,12 @@ impl FileManager {
             
             // Read-modify-write if partial block
             if chunk_size < BLOCK_SIZE && physical_block != 0 {
+                // PHASE 6 Data CoW Infrastructure:
+                // If we had the refcount_tree_root here, we would check if this physical_block
+                // has a refcount > 1. If it does, we must NOT modify it in place.
+                // We would allocate a new block, copy the existing data into the new block,
+                // decrement the refcount of the old block, and update the Inode's extent list.
+                // For now, we perform in-place modification.
                 ctx.read_block(physical_block, &mut buf)?;
             }
             
@@ -75,6 +107,28 @@ impl FileManager {
                 .copy_from_slice(&data[data_pos..data_pos + chunk_size]);
                 
             ctx.write_block(physical_block, &buf)?;
+            
+            // Calculate and store checksum
+            if checksum_tree_root != 0 {
+                let algo = ChecksumAlgorithm::XxHash64;
+                let csum_bytes = calculate_checksum(algo, &buf);
+                let mut csum_tree = ChecksumTree::new(checksum_tree_root);
+                let key = ChecksumTreeKey { object_id: inode.ino, logical_block };
+                let val = ChecksumTreeValue {
+                    physical_block,
+                    checksum_bytes: csum_bytes,
+                    generation: 1,
+                    algorithm_id: algo as u8,
+                    verification_status: 1, // Verified (just written)
+                    padding: [0; 6],
+                };
+                
+                let mut dummy_allocator = |_ctx: &mut TxContext| -> Result<u64> {
+                    Err(Error::new(ErrorKind::Other, "Not expecting allocation in ChecksumTree overwrite for now"))
+                };
+                // NOTE: Proper allocation lambda needed if tree grows
+                let _ = csum_tree.insert_checksum(ctx, key, val, &mut dummy_allocator);
+            }
             
             data_pos += chunk_size;
             current_offset += chunk_size as u64;

@@ -27,10 +27,12 @@ pub struct LionFS {
     inode_cache: InodeCache,
     dir_cache: DirCache,
     extent_cache: ExtentCache,
+    scrubber: crate::worker::scrubber::ScrubberWorker,
+    image_path: String,
 }
 
 impl LionFS {
-    pub fn new(mut disk: Disk) -> std::io::Result<Self> {
+    pub fn new(mut disk: Disk, image_path: String) -> std::io::Result<Self> {
         let mut buffer = [0u8; BLOCK_SIZE];
         let mut best_sb: Option<Superblock> = None;
         
@@ -65,13 +67,16 @@ impl LionFS {
         let tx_manager = TransactionManager::new(&superblock);
         
         let mut tx_manager = tx_manager;
-        if highest_tx > tx_manager.current_tx_id {
-            tx_manager.current_tx_id = highest_tx;
+        if highest_tx > tx_manager.current_tx_id.load(std::sync::atomic::Ordering::SeqCst) {
+            tx_manager.current_tx_id.store(highest_tx, std::sync::atomic::Ordering::SeqCst);
         }
 
         let inode_cache = InodeCache::new(10000);
         let dir_cache = DirCache::new(10000);
         let extent_cache = ExtentCache::new(10000);
+        
+        let mut scrubber = crate::worker::scrubber::ScrubberWorker::new();
+        // Background workers are initialized but waiting
         
         Ok(Self { 
             disk, 
@@ -79,7 +84,9 @@ impl LionFS {
             tx_manager, 
             inode_cache, 
             dir_cache, 
-            extent_cache 
+            extent_cache,
+            scrubber,
+            image_path,
         })
     }
     
@@ -145,15 +152,59 @@ impl LionFS {
             flags: inode.flags,
         }
     }
+    
+    fn to_virtual_attr(&self, ino: u64) -> FileAttr {
+        let now = SystemTime::now();
+        FileAttr {
+            ino,
+            size: 4096, // Virtual size
+            blocks: 1,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::RegularFile,
+            perm: 0o666,
+            nlink: 1,
+            uid: 1000, // lion
+            gid: 1000,
+            rdev: 0,
+            blksize: BLOCK_SIZE as u32,
+            flags: 0,
+        }
+    }
 }
 
 impl Filesystem for LionFS {
+    fn init(&mut self, _req: &Request, _config: &mut fuser::KernelConfig) -> std::result::Result<(), libc::c_int> {
+        let bg = self.get_bg_desc();
+        self.scrubber.start(self.superblock, bg, self.image_path.clone());
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        self.scrubber.stop();
+        // Sync and cleanly unmount
+        if let Err(e) = self.disk.sync() {
+            eprintln!("Failed to sync disk on unmount: {}", e);
+        }
+    }
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        if parent == 1 {
+            if name == OsStr::new(".lfs_scrub") {
+                reply.entry(&TTL, &self.to_virtual_attr(999999), 0);
+                return;
+            } else if name == OsStr::new(".lfs_health") {
+                reply.entry(&TTL, &self.to_virtual_attr(999998), 0);
+                return;
+            }
+        }
+
         let mut tx = self.tx_manager.begin(0);
         let mut ctx = TxContext::new(&mut self.disk, &mut tx);
         
-        if let Ok(parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
-            if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, &parent_inode) {
+        if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
+            if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode) {
                 let name_str = name.to_string_lossy();
                 for entry in entries {
                     if entry.name == name_str {
@@ -169,6 +220,10 @@ impl Filesystem for LionFS {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        if ino == 999999 || ino == 999998 {
+            reply.attr(&TTL, &self.to_virtual_attr(ino));
+            return;
+        }
         if let Ok(inode) = self.get_inode(ino) {
             reply.attr(&TTL, &self.to_file_attr(&inode));
         } else {
@@ -180,8 +235,8 @@ impl Filesystem for LionFS {
         let mut tx = self.tx_manager.begin(0);
         let mut ctx = TxContext::new(&mut self.disk, &mut tx);
         
-        if let Ok(inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
-            if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, &inode) {
+        if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
+            if let Ok(entries) = crate::directory::entries::DirManager::read_entries(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut inode) {
                 let mut dir_entries = vec![
                     (inode.ino, FileType::Directory, ".".to_string()),
                     (inode.ino, FileType::Directory, "..".to_string()), // Simplified parent for Phase 1
@@ -190,6 +245,11 @@ impl Filesystem for LionFS {
                 for entry in entries {
                     let kind = if entry.file_type == 2 { FileType::Directory } else { FileType::RegularFile };
                     dir_entries.push((entry.ino, kind, entry.name));
+                }
+                
+                if ino == 1 {
+                    dir_entries.push((999999, FileType::RegularFile, ".lfs_scrub".to_string()));
+                    dir_entries.push((999998, FileType::RegularFile, ".lfs_health".to_string()));
                 }
                 
                 for (i, entry) in dir_entries.into_iter().enumerate().skip(offset as usize) {
@@ -205,10 +265,29 @@ impl Filesystem for LionFS {
     }
 
     fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+        if ino == 999999 || ino == 999998 {
+            let data = if ino == 999999 {
+                self.scrubber.get_status().into_bytes()
+            } else {
+                let mut tx = self.tx_manager.begin(0);
+                let mut ctx = TxContext::new(&mut self.disk, &mut tx);
+                crate::integrity::bad_blocks::BadBlockManager::get_health_report(&mut ctx, self.superblock.bad_blocks_root).into_bytes()
+            };
+            
+            let offset = offset as usize;
+            if offset >= data.len() {
+                reply.data(&[]);
+            } else {
+                let end = std::cmp::min(offset + size as usize, data.len());
+                reply.data(&data[offset..end]);
+            }
+            return;
+        }
+
         let mut tx = self.tx_manager.begin(0);
         let mut ctx = TxContext::new(&mut self.disk, &mut tx);
-        if let Ok(inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
-            if let Ok(data) = crate::file::writer::FileManager::read_file(&mut ctx, &inode, offset as u64, size as u64) {
+        if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
+            if let Ok(data) = crate::file::writer::FileManager::read_file(&mut ctx, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut inode, offset as u64, size as u64) {
                 reply.data(&data);
                 return;
             }
@@ -217,6 +296,18 @@ impl Filesystem for LionFS {
     }
 
     fn write(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
+        if ino == 999999 {
+            if let Ok(cmd) = std::str::from_utf8(data) {
+                self.scrubber.handle_command(cmd.trim());
+            }
+            reply.written(data.len() as u32);
+            return;
+        }
+        if ino == 999998 {
+            reply.error(libc::EPERM);
+            return;
+        }
+
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut tx = self.tx_manager.begin(now);
         let mut success = false;
@@ -226,7 +317,7 @@ impl Filesystem for LionFS {
             let bg_desc = self.get_bg_desc();
             let mut ctx = TxContext::new(&mut self.disk, &mut tx);
             if let Ok(mut inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, ino) {
-                if let Ok(()) = crate::file::writer::FileManager::write_file(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut inode, offset as u64, data) {
+                if let Ok(()) = crate::file::writer::FileManager::write_file(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, &mut inode, offset as u64, data) {
                     inode.mtime = now as i64;
                     let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &inode);
                     success = true;
@@ -268,21 +359,22 @@ impl Filesystem for LionFS {
                         mtime: now as i64,
                         atime: now as i64,
                         extent_count: 0,
-                        padding2: 0,
-                        padding3: 0,
+                        compression_algo: 0,
+                        encryption_algo: 0,
+                        key_id: 0,
                         extents: [crate::ondisk::serialization::Extent { logical_start: 0, physical_start: 0, length: 0 }; 7],
                         checksum: 0,
                         padding4: [0; 12],
                     };
                     
                     if crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &new_inode).is_ok() {
-                        if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut parent_inode, name, new_ino, 2).is_ok() {
+                        if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode, name, new_ino, 2).is_ok() {
                             parent_inode.mtime = now as i64;
                             let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &parent_inode);
                             
                             // Also need to add . and .. to new dir
-                            let _ = crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut new_inode, std::ffi::OsStr::new("."), new_ino, 2);
-                            let _ = crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut new_inode, std::ffi::OsStr::new(".."), parent, 2);
+                            let _ = crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut new_inode, std::ffi::OsStr::new("."), new_ino, 2);
+                            let _ = crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut new_inode, std::ffi::OsStr::new(".."), parent, 2);
                             
                             success = true;
                             final_inode = Some(new_inode);
@@ -325,15 +417,16 @@ impl Filesystem for LionFS {
                         mtime: now as i64,
                         atime: now as i64,
                         extent_count: 0,
-                        padding2: 0,
-                        padding3: 0,
+                        compression_algo: 0,
+                        encryption_algo: 0,
+                        key_id: 0,
                         extents: [crate::ondisk::serialization::Extent { logical_start: 0, physical_start: 0, length: 0 }; 7],
                         checksum: 0,
                         padding4: [0; 12],
                     };
                     
                     if crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &new_inode).is_ok() {
-                        if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut parent_inode, name, new_ino, 1).is_ok() {
+                        if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode, name, new_ino, 1).is_ok() {
                             parent_inode.mtime = now as i64;
                             let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_tree_root, &parent_inode);
                             
@@ -362,8 +455,8 @@ impl Filesystem for LionFS {
         {
             let bg_desc = self.get_bg_desc();
             let mut ctx = TxContext::new(&mut self.disk, &mut tx);
-            if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, parent) {
-                if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut parent_inode, name) {
+            if let Ok(mut parent_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_tree_root, parent) {
+                if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut parent_inode, name) {
                     if let Ok(mut target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, target_ino) {
                         target_inode.links_count -= 1;
                         if target_inode.links_count == 0 {
@@ -400,10 +493,10 @@ impl Filesystem for LionFS {
                 let bg_desc = self.get_bg_desc();
                 let mut ctx = TxContext::new(&mut self.disk, &mut tx);
                 if let Ok(mut p_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, parent) {
-                    if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut p_inode, name) {
+                    if let Ok(Some(target_ino)) = crate::directory::entries::DirManager::remove_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut p_inode, name) {
                         if let Ok(target_inode) = crate::inode::manager::InodeManager::read_inode(&mut ctx, self.superblock.inode_table_start, target_ino) {
                             let file_type = if (target_inode.mode & libc::S_IFDIR) != 0 { 2 } else { 1 };
-                            if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, &mut p_inode, newname, target_ino, file_type).is_ok() {
+                            if crate::directory::entries::DirManager::add_entry(&mut ctx, &bg_desc, self.superblock.blocks_per_group, self.superblock.checksum_tree_root, self.superblock.bad_blocks_root, &mut p_inode, newname, target_ino, file_type).is_ok() {
                                 p_inode.mtime = now as i64;
                                 let _ = crate::inode::manager::InodeManager::write_inode(&mut ctx, self.superblock.inode_table_start, &p_inode);
                                 success = true;

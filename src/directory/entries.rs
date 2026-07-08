@@ -14,8 +14,8 @@ pub struct DirEntry {
 pub struct DirManager;
 
 impl DirManager {
-    pub fn read_entries(ctx: &mut TxContext, inode: &Inode) -> Result<Vec<DirEntry>> {
-        let data = FileManager::read_file(ctx, inode, 0, inode.size)?;
+    pub fn read_entries(ctx: &mut TxContext, checksum_tree_root: u64, bad_blocks_root: u64, inode: &mut Inode) -> Result<Vec<DirEntry>> {
+        let data = FileManager::read_file(ctx, checksum_tree_root, bad_blocks_root, inode, 0, inode.size)?;
         let mut entries = Vec::new();
         let mut offset = 0;
         
@@ -51,7 +51,7 @@ impl DirManager {
         Ok(entries)
     }
 
-    pub fn add_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, name: &OsStr, target_ino: u64, file_type: u8) -> Result<()> {
+    pub fn add_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, checksum_tree_root: u64, bad_blocks_root: u64, inode: &mut Inode, name: &OsStr, target_ino: u64, file_type: u8) -> Result<()> {
         let name_bytes = name.as_bytes();
         if name_bytes.len() > 255 {
             return Err(Error::new(ErrorKind::InvalidInput, "Name too long"));
@@ -60,7 +60,7 @@ impl DirManager {
         let required_len = (16 + name_bytes.len() as u16 + 7) & !7; // 8-byte aligned
         
         // Let's read the whole directory to find a spot or append
-        let data = FileManager::read_file(ctx, inode, 0, inode.size)?;
+        let data = FileManager::read_file(ctx, checksum_tree_root, bad_blocks_root, inode, 0, inode.size)?;
         let mut offset = 0;
         
         while offset < data.len() {
@@ -86,7 +86,7 @@ impl DirManager {
                     entry_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     entry_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
                     
-                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &entry_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, offset as u64, &entry_bytes)?;
                     return Ok(());
                 }
             } else {
@@ -102,7 +102,7 @@ impl DirManager {
                     current_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     let name_end = 16 + header.name_len as usize;
                     current_bytes[16..name_end].copy_from_slice(&data[offset + 16..offset + name_end]);
-                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &current_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, offset as u64, &current_bytes)?;
                     
                     // New entry
                     let mut new_header = DirEntryHeader {
@@ -117,7 +117,7 @@ impl DirManager {
                     new_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&new_header));
                     new_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
                     
-                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, (offset + current_required as usize) as u64, &new_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, (offset + current_required as usize) as u64, &new_bytes)?;
                     return Ok(());
                 }
             }
@@ -138,13 +138,13 @@ impl DirManager {
         new_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&new_header));
         new_bytes[16..16 + name_bytes.len()].copy_from_slice(name_bytes);
         
-        FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, inode.size, &new_bytes)?;
+        FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, inode.size, &new_bytes)?;
         Ok(())
     }
 
-    pub fn remove_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, inode: &mut Inode, name: &OsStr) -> Result<Option<u64>> {
+    pub fn remove_entry(ctx: &mut TxContext, bg_desc: &BlockGroupDescriptor, blocks_per_group: u32, checksum_tree_root: u64, bad_blocks_root: u64, inode: &mut Inode, name: &OsStr) -> Result<Option<u64>> {
         let name_bytes = name.as_bytes();
-        let data = FileManager::read_file(ctx, inode, 0, inode.size)?;
+        let data = FileManager::read_file(ctx, checksum_tree_root, bad_blocks_root, inode, 0, inode.size)?;
         let mut offset = 0;
         
         while offset < data.len() {
@@ -166,7 +166,7 @@ impl DirManager {
                     let mut entry_bytes = vec![0u8; header.rec_len as usize];
                     entry_bytes[0..16].copy_from_slice(bytemuck::bytes_of(&header));
                     
-                    FileManager::write_file(ctx, bg_desc, blocks_per_group, inode, offset as u64, &entry_bytes)?;
+                    FileManager::write_file(ctx, bg_desc, blocks_per_group, checksum_tree_root, inode, offset as u64, &entry_bytes)?;
                     return Ok(Some(target_ino));
                 }
             }

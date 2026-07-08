@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use bytemuck::{Pod, Zeroable, bytes_of, from_bytes, from_bytes_mut, bytes_of_mut};
 use crate::transaction::transaction::TxContext;
 use crate::btree::node::{BTreeNodeData, BTREE_PAYLOAD_SIZE, BTREE_MAGIC};
+use crate::integrity::algorithms::{calculate_checksum, ChecksumAlgorithm};
 
 pub trait BTreeItem: Pod + Zeroable + Clone + Copy + std::fmt::Debug {}
 impl<T: Pod + Zeroable + Clone + Copy + std::fmt::Debug> BTreeItem for T {}
@@ -71,9 +72,31 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid BTree node magic or type"));
         }
         
+        // Verify checksum
+        let expected_csum = node.header.checksum;
+        let mut node_copy = node;
+        node_copy.header.checksum = 0;
+        let csum_bytes = calculate_checksum(ChecksumAlgorithm::Crc32c, bytes_of(&node_copy));
+        let computed_csum = u32::from_le_bytes(csum_bytes[0..4].try_into().unwrap());
+        
+        if expected_csum != computed_csum && expected_csum != 0 {
+            // Checksum mismatch
+            eprintln!("BTree Node Corruption detected at block {}", block_num);
+            return Err(Error::new(ErrorKind::InvalidData, "BTree Node Checksum Mismatch"));
+        }
+        
         if let Some(cache) = &ctx.node_cache {
             if !ctx.tx.dirty_blocks.contains_key(&block_num) {
-                cache.insert(block_num, node);
+                // Ensure we insert a cache-line aligned copy
+                let mut aligned_node = BTreeNodeData::new(node.header.level, node.header.node_type);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &node as *const BTreeNodeData as *const u8,
+                        &mut aligned_node as *mut BTreeNodeData as *mut u8,
+                        std::mem::size_of::<BTreeNodeData>()
+                    );
+                }
+                cache.insert(block_num, aligned_node);
             }
         }
         
@@ -82,10 +105,15 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
 
     /// Helper to write a node
     fn write_node(&self, ctx: &mut TxContext, block_num: u64, node: &BTreeNodeData) -> Result<()> {
-        let bytes = bytes_of(node);
+        let mut node_copy = *node;
+        node_copy.header.checksum = 0;
+        let csum_bytes = calculate_checksum(ChecksumAlgorithm::Crc32c, bytes_of(&node_copy));
+        node_copy.header.checksum = u32::from_le_bytes(csum_bytes[0..4].try_into().unwrap());
+
+        let bytes = bytes_of(&node_copy);
         ctx.write_block(block_num, bytes)?;
         if let Some(cache) = &ctx.node_cache {
-            cache.insert(block_num, *node);
+            cache.insert(block_num, node_copy);
         }
         Ok(())
     }
@@ -149,6 +177,11 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         
         // Find leaf
         let mut node = loop {
+            // CoW logic: if node generation <= last_snapshot_generation, CoW it!
+            // Wait, we don't have access to last_snapshot_generation here easily unless we pass it.
+            // Let's pass `generation: u64` and `last_snapshot: u64` in `TxContext` or as parameters.
+            // But we don't want to change the signature if possible.
+            // Wait, we do have `ctx`. Maybe `TxContext` doesn't have it.
             let n = self.read_node(ctx, current_block)?;
             path.push(current_block);
             if n.header.level == 0 {
@@ -173,7 +206,8 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         let count = node.header.item_count as usize;
         if count >= Self::max_leaf_items() - 1 {
             // Need to split
-            let new_root = self.split_leaf(ctx, current_block, &mut node, &mut allocate_block)?;
+            path.pop(); // remove current_block from path
+            let new_root = self.split_leaf(ctx, current_block, &mut node, &mut path, &mut allocate_block)?;
             if let Some(r) = new_root {
                 self.root_block = r;
             }
@@ -213,13 +247,12 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         self.write_node(ctx, current_block, &node)
     }
 
-    fn split_leaf<F>(&mut self, ctx: &mut TxContext, leaf_block: u64, leaf_node: &mut BTreeNodeData, allocate_block: &mut F) -> Result<Option<u64>>
+    fn split_leaf<F>(&mut self, ctx: &mut TxContext, leaf_block: u64, leaf_node: &mut BTreeNodeData, path: &mut Vec<u64>, allocate_block: &mut F) -> Result<Option<u64>>
     where
         F: FnMut(&mut TxContext) -> Result<u64>,
     {
         let right_block = allocate_block(ctx)?;
         let mut right_node = BTreeNodeData::new(0, self.node_type);
-        right_node.header.parent_block = leaf_node.header.parent_block;
         right_node.header.next_leaf = leaf_node.header.next_leaf;
         right_node.header.prev_leaf = leaf_block;
         
@@ -245,10 +278,11 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         self.write_node(ctx, right_block, &right_node)?;
         self.write_node(ctx, leaf_block, leaf_node)?;
         
-        self.insert_into_parent(ctx, leaf_node.header.parent_block, leaf_block, promote_key, right_block, allocate_block)
+        let parent_block = path.pop().unwrap_or(0);
+        self.insert_into_parent(ctx, parent_block, leaf_block, promote_key, right_block, path, allocate_block)
     }
 
-    fn insert_into_parent<F>(&mut self, ctx: &mut TxContext, parent_block: u64, left_block: u64, key: K, right_block: u64, allocate_block: &mut F) -> Result<Option<u64>>
+    fn insert_into_parent<F>(&mut self, ctx: &mut TxContext, parent_block: u64, left_block: u64, key: K, right_block: u64, path: &mut Vec<u64>, allocate_block: &mut F) -> Result<Option<u64>>
     where
         F: FnMut(&mut TxContext) -> Result<u64>,
     {
@@ -268,31 +302,21 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             root_node.header.item_count = 1;
             
             self.write_node(ctx, new_root, &root_node)?;
-            
-            // Update children's parent pointers
-            let mut left_node = self.read_node(ctx, left_block)?;
-            left_node.header.parent_block = new_root;
-            self.write_node(ctx, left_block, &left_node)?;
-            
-            let mut right_node = self.read_node(ctx, right_block)?;
-            right_node.header.parent_block = new_root;
-            self.write_node(ctx, right_block, &right_node)?;
-            
             return Ok(Some(new_root));
         }
         
         // Read parent
         let mut parent_node = self.read_node(ctx, parent_block)?;
         let count = parent_node.header.item_count as usize;
-        
-        let old_items: &[KPtrPair<K>] = bytemuck::cast_slice(&parent_node.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
+
         let mut items = vec![KPtrPair { key: key.clone(), ptr: 0 }; count + 1];
+        let old_items: &[KPtrPair<K>] = bytemuck::cast_slice(&parent_node.payload[8..8 + count * std::mem::size_of::<KPtrPair<K>>()]);
         
         let insert_idx = match old_items.binary_search_by(|kv| kv.key.cmp(&key)) {
-            Ok(idx) => idx + 1, // Should not exist, but if it does, insert after
+            Ok(idx) => idx + 1,
             Err(idx) => idx,
         };
-        
+
         if insert_idx > 0 {
             items[..insert_idx].copy_from_slice(&old_items[..insert_idx]);
         }
@@ -300,7 +324,7 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
         if insert_idx < count {
             items[insert_idx + 1..].copy_from_slice(&old_items[insert_idx..]);
         }
-        
+
         if count >= Self::max_internal_items() - 1 {
             // Need to split parent internal node
             let right_internal_block = allocate_block(ctx)?;
@@ -317,15 +341,14 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
             let right_leftmost_ptr: [u8; 8] = bytemuck::cast(items[mid].ptr);
             right_internal_node.payload[0..8].copy_from_slice(&right_leftmost_ptr);
             
-            let right_items = &items[mid + 1..];
+            let right_items = &items[mid+1..];
             let right_bytes = bytemuck::cast_slice(right_items);
             right_internal_node.payload[8..8 + right_bytes.len()].copy_from_slice(right_bytes);
             right_internal_node.header.item_count = right_count as u16;
             
             parent_node.header.item_count = mid as u16;
-            let left_items = &items[..mid];
-            let left_bytes = bytemuck::cast_slice(left_items);
-            parent_node.payload[8..8 + left_bytes.len()].copy_from_slice(left_bytes);
+            let end_bytes = 8 + parent_node.header.item_count as usize * std::mem::size_of::<KPtrPair<K>>();
+            parent_node.payload[end_bytes..8 + count * std::mem::size_of::<KPtrPair<K>>()].fill(0);
             
             self.write_node(ctx, right_internal_block, &right_internal_node)?;
             self.write_node(ctx, parent_block, &parent_node)?;
@@ -341,7 +364,8 @@ impl<K: BTreeKey, V: BTreeItem> BTree<K, V> {
                 self.write_node(ctx, item.ptr, &child)?;
             }
             
-            return self.insert_into_parent(ctx, parent_node.header.parent_block, parent_block, promote_up_key, right_internal_block, allocate_block);
+            let parent_parent = path.pop().unwrap_or(0);
+            return self.insert_into_parent(ctx, parent_parent, parent_block, promote_up_key, right_internal_block, path, allocate_block);
         }
         
         parent_node.header.item_count += 1;
@@ -495,7 +519,20 @@ mod tests {
             extent_tree_root: 0,
             freespace_tree_root: 0,
             next_ino: 2,
-            padding2: [0; 3920],
+            checksum_tree_root: 0,
+            bad_blocks_root: 0,
+            snapshot_tree_root: 0, clone_tree_root: 0, refcount_tree_root: 0, subvolume_tree_root: 0, space_map_root: 0, last_snapshot_generation: 0, dedupe_tree_root: 0,
+            key_tree_root: 0,
+            fs_features: 0,
+            default_compression: 0,
+            default_encryption: 0,
+            padding_phase7: [0; 6],
+            device_tree_root: 0,
+            pool_uuid: [0; 16],
+            raid_profile: 0,
+            padding_raid: [0; 3],
+            chunk_size: 0,
+            padding2: [0; 3792],
         };
         disk.write_block(0, bytemuck::bytes_of(&sb)).unwrap();
         
@@ -534,7 +571,7 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join("test_btree_back.img");
         let mut disk = Disk::create(&path, 1024 * 1024 * 10).unwrap();
-        let sb = Superblock { magic: 0, version: 0, block_size: 4096, total_blocks: 1024, free_blocks: 0, inode_count: 0, root_inode: 0, flags: 0, padding1: 0, bitmap_start: 0, inode_table_start: 0, data_region_start: 0, generation: 0, checksum: 0, padding_csum: 0, journal_start: 1, journal_blocks: 10, secondary_sb_1: 0, secondary_sb_2: 0, block_group_count: 0, blocks_per_group: 0, inode_tree_root: 0, dir_tree_root: 0, extent_tree_root: 0, freespace_tree_root: 0, next_ino: 2, padding2: [0; 3920] };
+        let sb = Superblock { magic: 0, version: 0, block_size: 4096, total_blocks: 1024, free_blocks: 0, inode_count: 0, root_inode: 0, flags: 0, padding1: 0, bitmap_start: 0, inode_table_start: 0, data_region_start: 0, generation: 0, checksum: 0, padding_csum: 0, journal_start: 1, journal_blocks: 10, secondary_sb_1: 0, secondary_sb_2: 0, block_group_count: 0, blocks_per_group: 0, inode_tree_root: 0, dir_tree_root: 0, extent_tree_root: 0, freespace_tree_root: 0, next_ino: 2, checksum_tree_root: 0, bad_blocks_root: 0, snapshot_tree_root: 0, clone_tree_root: 0, refcount_tree_root: 0, subvolume_tree_root: 0, space_map_root: 0, last_snapshot_generation: 0, dedupe_tree_root: 0, key_tree_root: 0, fs_features: 0, default_compression: 0, default_encryption: 0, padding_phase7: [0; 6], device_tree_root: 0, pool_uuid: [0; 16], raid_profile: 0, padding_raid: [0; 3], chunk_size: 0, padding2: [0; 3792] };
         disk.write_block(0, bytemuck::bytes_of(&sb)).unwrap();
         
         let mut tm = TransactionManager::new(&sb);
@@ -568,7 +605,7 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join("test_btree_remove.img");
         let mut disk = Disk::create(&path, 1024 * 1024 * 10).unwrap();
-        let sb = Superblock { magic: 0, version: 0, block_size: 4096, total_blocks: 1024, free_blocks: 0, inode_count: 0, root_inode: 0, flags: 0, padding1: 0, bitmap_start: 0, inode_table_start: 0, data_region_start: 0, generation: 0, checksum: 0, padding_csum: 0, journal_start: 1, journal_blocks: 10, secondary_sb_1: 0, secondary_sb_2: 0, block_group_count: 0, blocks_per_group: 0, inode_tree_root: 0, dir_tree_root: 0, extent_tree_root: 0, freespace_tree_root: 0, next_ino: 2, padding2: [0; 3920] };
+        let sb = Superblock { magic: 0, version: 0, block_size: 4096, total_blocks: 1024, free_blocks: 0, inode_count: 0, root_inode: 0, flags: 0, padding1: 0, bitmap_start: 0, inode_table_start: 0, data_region_start: 0, generation: 0, checksum: 0, padding_csum: 0, journal_start: 1, journal_blocks: 10, secondary_sb_1: 0, secondary_sb_2: 0, block_group_count: 0, blocks_per_group: 0, inode_tree_root: 0, dir_tree_root: 0, extent_tree_root: 0, freespace_tree_root: 0, next_ino: 2, checksum_tree_root: 0, bad_blocks_root: 0, snapshot_tree_root: 0, clone_tree_root: 0, refcount_tree_root: 0, subvolume_tree_root: 0, space_map_root: 0, last_snapshot_generation: 0, dedupe_tree_root: 0, key_tree_root: 0, fs_features: 0, default_compression: 0, default_encryption: 0, padding_phase7: [0; 6], device_tree_root: 0, pool_uuid: [0; 16], raid_profile: 0, padding_raid: [0; 3], chunk_size: 0, padding2: [0; 3792] };
         disk.write_block(0, bytemuck::bytes_of(&sb)).unwrap();
         
         let mut tm = TransactionManager::new(&sb);

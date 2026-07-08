@@ -16,7 +16,7 @@ fn main() {
     let mountpoint = &args[2];
 
     let disk = Disk::open(image_file).expect("Failed to open image file");
-    let fs = LionFS::new(disk).expect("Failed to mount LionFS");
+    let fs = LionFS::new(disk, image_file.to_string()).expect("Failed to mount LionFS");
 
     let options = vec![
         MountOption::FSName("lionfs".to_string()),

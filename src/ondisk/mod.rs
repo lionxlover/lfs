@@ -5,5 +5,6 @@ pub mod extent;
 pub mod inode;
 pub mod object_header;
 pub mod serialization;
+pub mod upgrade;
 pub mod superblock;
 pub mod validation;

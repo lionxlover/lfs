@@ -4,26 +4,28 @@ use crate::ondisk::serialization::{Superblock, JournalHeader, JournalRecordHeade
 use crate::transaction::transaction::Transaction;
 use crate::utils::crc::compute_checksum;
 use bytemuck::bytes_of;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 pub struct TransactionManager {
-    pub current_tx_id: u64,
-    pub next_journal_block: u64,
+    pub current_tx_id: AtomicU64,
+    pub next_journal_block: RwLock<u64>,
 }
 
 impl TransactionManager {
     pub fn new(sb: &Superblock) -> Self {
         Self {
-            current_tx_id: sb.generation + 1,
-            next_journal_block: 0, // This will wrap around journal_blocks
+            current_tx_id: AtomicU64::new(sb.generation + 1),
+            next_journal_block: RwLock::new(0), // This will wrap around journal_blocks
         }
     }
 
-    pub fn begin(&mut self, timestamp: u64) -> Transaction {
-        self.current_tx_id += 1;
-        Transaction::new(self.current_tx_id, timestamp)
+    pub fn begin(&self, timestamp: u64) -> Transaction {
+        let tx_id = self.current_tx_id.fetch_add(1, Ordering::SeqCst);
+        Transaction::new(tx_id, timestamp)
     }
 
-    pub fn commit(&mut self, disk: &mut Disk, sb: &Superblock, tx: &Transaction) -> Result<()> {
+    pub fn commit(&self, disk: &mut Disk, sb: &Superblock, tx: &Transaction) -> Result<()> {
         if tx.dirty_blocks.is_empty() {
             return Ok(());
         }
@@ -43,8 +45,9 @@ impl TransactionManager {
 
         header.checksum = compute_checksum(bytes_of(&header));
 
-        // Write header to journal
-        let start_logical = self.next_journal_block;
+        // Lock journal offset for sequential write
+        let mut j_block_guard = self.next_journal_block.write().unwrap();
+        let start_logical = *j_block_guard;
         let mut current_j_block = start_logical;
         
         let header_p_block = sb.journal_start + (current_j_block % sb.journal_blocks);
@@ -54,7 +57,7 @@ impl TransactionManager {
         // Write records
         for (&p_block, data) in &tx.dirty_blocks {
             let data_checksum = compute_checksum(data);
-            let mut rec_header = JournalRecordHeader {
+            let rec_header = JournalRecordHeader {
                 tx_id: tx.id,
                 physical_block: p_block,
                 checksum: data_checksum,
@@ -90,6 +93,9 @@ impl TransactionManager {
         // Flush footer so transaction is firmly committed in WAL
         disk.sync()?;
 
+        *j_block_guard = current_j_block % sb.journal_blocks;
+        drop(j_block_guard); // Release lock early before applying to actual disk locations
+
         // Now apply to actual disk locations
         for (&p_block, data) in &tx.dirty_blocks {
             disk.write_block(p_block, data)?;
@@ -98,7 +104,6 @@ impl TransactionManager {
         // Flush final data
         disk.sync()?;
 
-        self.next_journal_block = current_j_block % sb.journal_blocks;
         Ok(())
     }
 }

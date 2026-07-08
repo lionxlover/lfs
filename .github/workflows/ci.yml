@@ -1,0 +1,28 @@
+name: LionFS CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libfuse-dev
+      
+    - name: Build
+      run: cargo build --verbose
+      
+    - name: Run tests
+      run: cargo test --verbose
+      
+    - name: Check Formatting
+      run: cargo fmt -- --check
+      
+    - name: Linting
+      run: cargo clippy -- -D warnings

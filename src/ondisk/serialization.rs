@@ -3,6 +3,7 @@ use bytemuck::{Pod, Zeroable};
 pub const BLOCK_SIZE: usize = 4096;
 pub const LIONFS_MAGIC: u64 = 0x4C494F4E46533130; // "LIONFS10"
 pub const MAX_INLINE_EXTENTS: usize = 7;
+pub const DEVICE_TREE_NODE_TYPE: u8 = 10;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -33,7 +34,28 @@ pub struct Superblock {
     pub extent_tree_root: u64,
     pub freespace_tree_root: u64,
     pub next_ino: u64,
-    pub padding2: [u8; BLOCK_SIZE - 176], // 176 bytes used
+    pub checksum_tree_root: u64,
+    pub bad_blocks_root: u64,
+    pub snapshot_tree_root: u64,
+    pub clone_tree_root: u64,
+    pub refcount_tree_root: u64,
+    pub subvolume_tree_root: u64,
+    pub space_map_root: u64,
+    pub last_snapshot_generation: u64,
+    // Phase 7
+    pub dedupe_tree_root: u64,
+    pub key_tree_root: u64,
+    pub fs_features: u64, // Flags for compression, encryption, dedupe enabled
+    pub default_compression: u8,
+    pub default_encryption: u8,
+    pub padding_phase7: [u8; 6],
+    // Phase 8
+    pub device_tree_root: u64,
+    pub pool_uuid: [u8; 16],
+    pub raid_profile: u8,
+    pub padding_raid: [u8; 3],
+    pub chunk_size: u32,
+    pub padding2: [u8; BLOCK_SIZE - 304],
 }
 
 #[repr(C)]
@@ -96,6 +118,47 @@ pub struct Extent {
     pub length: u64,
 }
 
+// Phase 6 Records
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct SnapshotRecord {
+    pub id: u64,
+    pub parent_id: u64,
+    pub creation_time: u64,
+    pub generation: u64,
+    pub inode_tree_root: u64,
+    pub dir_tree_root: u64,
+    pub extent_tree_root: u64,
+    pub checksum_tree_root: u64,
+    pub bad_blocks_root: u64,
+    pub flags: u32,
+    pub padding: u32,
+    pub reserved: [u64; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct CloneRecord {
+    pub id: u64,
+    pub source_id: u64,
+    pub generation: u64,
+    pub shared_extents: u64,
+    pub reserved: [u64; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct SubvolumeRecord {
+    pub id: u64,
+    pub parent_id: u64,
+    pub inode_tree_root: u64,
+    pub dir_tree_root: u64,
+    pub extent_tree_root: u64,
+    pub flags: u64,
+    pub reserved: [u64; 4],
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Inode {
@@ -111,8 +174,9 @@ pub struct Inode {
     pub mtime: i64,
     pub atime: i64,
     pub extent_count: u16,
-    pub padding2: u16,
-    pub padding3: u32,
+    pub compression_algo: u8,
+    pub encryption_algo: u8,
+    pub key_id: u32,
     pub extents: [Extent; MAX_INLINE_EXTENTS],
     pub checksum: u32,
     pub padding4: [u8; 12], // Pads Inode to exactly 256 bytes

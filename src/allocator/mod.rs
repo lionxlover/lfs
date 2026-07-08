@@ -1,5 +1,6 @@
 pub mod allocator;
 pub mod bitmap;
+pub mod cache;
 pub mod extents;
 pub mod free_space;
 pub mod locality;

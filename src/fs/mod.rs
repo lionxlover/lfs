@@ -1,5 +1,11 @@
 pub mod filesystem;
+pub mod snapshots;
+pub mod clones;
+pub mod volumes;
 pub mod metadata;
 pub mod operations;
 pub mod stat;
 pub mod sync;
+pub mod compression;
+pub mod dedupe;
+pub mod stats;
